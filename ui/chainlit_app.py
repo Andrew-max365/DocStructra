@@ -316,7 +316,7 @@ async def _show_diff_cards(
     out_bytes: bytes,
     filename: str,
 ) -> None:
-    """Display diff items as inline GFM cards with ~~strikethrough~~ rendered in the browser."""
+    """Display diff items as HTML diff cards (Word-style red/green) rendered in the browser."""
     # Extract paragraph texts from the formatted document for context display
     paragraph_texts: Optional[List[str]] = None
     _tmp = None
