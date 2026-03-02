@@ -278,6 +278,107 @@ def apply_and_save_proofread(
 
 
 # ---------------------------------------------------------------------------
+# HTML side-by-side diff table
+# ---------------------------------------------------------------------------
+
+import difflib
+import html as _html_module
+
+
+def _char_diff_html(old_text: str, new_text: str) -> Tuple[str, str]:
+    """
+    Return (old_html, new_html) strings with character-level diff highlighted.
+    Deletions are wrapped in ``<span class="del">`` and insertions in
+    ``<span class="ins">`` for CSS styling.
+    """
+    old_chars = list(old_text)
+    new_chars = list(new_text)
+    matcher = difflib.SequenceMatcher(None, old_chars, new_chars, autojunk=False)
+
+    old_parts: List[str] = []
+    new_parts: List[str] = []
+
+    for op, i1, i2, j1, j2 in matcher.get_opcodes():
+        old_seg = _html_module.escape("".join(old_chars[i1:i2]))
+        new_seg = _html_module.escape("".join(new_chars[j1:j2]))
+        if op == "equal":
+            old_parts.append(old_seg)
+            new_parts.append(new_seg)
+        elif op == "replace":
+            old_parts.append(f'<span class="del">{old_seg}</span>')
+            new_parts.append(f'<span class="ins">{new_seg}</span>')
+        elif op == "delete":
+            old_parts.append(f'<span class="del">{old_seg}</span>')
+        elif op == "insert":
+            new_parts.append(f'<span class="ins">{new_seg}</span>')
+
+    return "".join(old_parts), "".join(new_parts)
+
+
+_DIFF_TABLE_STYLE = """
+<style>
+.diff-wrap{overflow-x:auto;margin:8px 0}
+.diff-tbl{border-collapse:collapse;width:100%;font-size:13px;font-family:sans-serif}
+.diff-tbl th{background:#f5f5f5;padding:6px 10px;text-align:left;border:1px solid #ddd;white-space:nowrap}
+.diff-tbl td{padding:6px 10px;border:1px solid #ddd;vertical-align:top}
+.diff-tbl .c-num{width:36px;font-weight:700;color:#555;white-space:nowrap}
+.diff-tbl .c-tag{width:110px;white-space:nowrap}
+.diff-tbl .c-old{background:#fff5f5}
+.diff-tbl .c-new{background:#f5fff5}
+.diff-tbl .c-note{color:#666;font-size:12px}
+span.del{background:#ffc8c8;text-decoration:line-through}
+span.ins{background:#c8ffc8}
+</style>
+"""
+
+
+def generate_diff_html(diff_items: List[DiffItem]) -> str:
+    """
+    Generate an HTML string containing a side-by-side diff table for *diff_items*.
+
+    The table has columns: #, 类型, ❌ 原文, ✅ 建议, 说明.
+    Character-level differences are highlighted with ``<span class="del/ins">``.
+    """
+    rows: List[str] = []
+    for item in diff_items:
+        icon = _ISSUE_ICONS.get(item.issue_type, "📝")
+        sev = _SEVERITY_ICONS.get(item.severity, "")
+        label = _ISSUE_LABELS.get(item.issue_type, item.issue_type)
+        location = f"<br><small>段落 {item.para_idx}</small>" if item.para_idx is not None else ""
+
+        old_html, new_html = _char_diff_html(item.evidence, item.suggestion)
+        note_html = _html_module.escape(item.rationale)
+
+        rows.append(
+            f"<tr>"
+            f'<td class="c-num">#{item.number}</td>'
+            f'<td class="c-tag">{icon}{sev} {_html_module.escape(label)}{location}</td>'
+            f'<td class="c-old">{old_html}</td>'
+            f'<td class="c-new">{new_html}</td>'
+            f'<td class="c-note">{note_html}</td>'
+            f"</tr>"
+        )
+
+    header = (
+        "<tr>"
+        "<th>#</th>"
+        "<th>类型</th>"
+        "<th>❌ 原文</th>"
+        "<th>✅ 建议</th>"
+        "<th>说明</th>"
+        "</tr>"
+    )
+    return (
+        f"{_DIFF_TABLE_STYLE}"
+        f'<div class="diff-wrap">'
+        f'<table class="diff-tbl">'
+        f"<thead>{header}</thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        f"</table></div>"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Structural diff summary
 # ---------------------------------------------------------------------------
 
