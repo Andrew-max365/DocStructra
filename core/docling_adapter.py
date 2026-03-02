@@ -55,7 +55,7 @@ def _map_docling_to_blocks(docling_doc: Any) -> list:
     """将 Docling 文档结构映射到 role hint 列表。"""
     hints: list = []
     try:
-        items = getattr(docling_doc, "texts", []) or []
+        items = getattr(docling_doc, "texts", [])
         for i, item in enumerate(items):
             label = getattr(item, "label", "text")
             role = DOCLING_LABEL_MAP.get(str(label).lower(), "body")

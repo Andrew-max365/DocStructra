@@ -81,8 +81,7 @@ def validate_node(state: GraphState) -> dict:
             passed = False
     except Exception as e:
         errors.append(f"格式化失败: {e}")
-        # Unexpected errors are not retried - treat as passed to avoid infinite loops
-        passed = True
+        passed = False
         report = state.get("report", {})
 
     if passed or state["current_iter"] >= state["max_iters"]:

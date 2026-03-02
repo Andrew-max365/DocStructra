@@ -80,6 +80,8 @@ async def on_message(message: cl.Message):
         if use_react:
             await cl.Message(content="🔄 启动 ReAct 迭代闭环...").send()
 
+            tmp_in_path: Optional[str] = None
+            tmp_out_path: Optional[str] = None
             try:
                 with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp_in:
                     tmp_in.write(input_bytes)
@@ -114,6 +116,13 @@ async def on_message(message: cl.Message):
                 out_bytes, report = format_docx_bytes(
                     input_bytes, filename_hint=docx_file.name, label_mode="rule"
                 )
+            finally:
+                for _tmp in (tmp_in_path, tmp_out_path):
+                    if _tmp is not None:
+                        try:
+                            os.remove(_tmp)
+                        except OSError:
+                            pass
         else:
             out_bytes, report = format_docx_bytes(
                 input_bytes,
