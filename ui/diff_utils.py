@@ -12,6 +12,7 @@ Provides:
 """
 from __future__ import annotations
 
+import io as _io
 import os
 import re
 import tempfile
@@ -97,7 +98,7 @@ def build_diff_items(issues: List[dict]) -> List[DiffItem]:
 
 # Patterns that signal "accept all" (i.e., no rejections)
 _ACCEPT_ALL_PATTERNS = re.compile(
-    r"(全部接受|全部同意|全部确认|确认所有|accept\s*all|接受全部|同意全部|应用全部|全部应用)",
+    r"(全部接受|全部同意|全部确认|确认所有|accept\s*all|接受全部|同意全部|应用全部|全部应用|^确认$|^同意$|^好的?$|^ok$)",
     re.IGNORECASE,
 )
 # Patterns that signal "reject all"
@@ -278,104 +279,219 @@ def apply_and_save_proofread(
 
 
 # ---------------------------------------------------------------------------
-# HTML side-by-side diff table
+# Markdown side-by-side diff table
 # ---------------------------------------------------------------------------
 
-import difflib
-import html as _html_module
 
-
-def _char_diff_html(old_text: str, new_text: str) -> Tuple[str, str]:
+def generate_diff_markdown(diff_items: List[DiffItem]) -> str:
     """
-    Return (old_html, new_html) strings with character-level diff highlighted.
-    Deletions are wrapped in ``<span class="del">`` and insertions in
-    ``<span class="ins">`` for CSS styling.
-    """
-    old_chars = list(old_text)
-    new_chars = list(new_text)
-    matcher = difflib.SequenceMatcher(None, old_chars, new_chars, autojunk=False)
-
-    old_parts: List[str] = []
-    new_parts: List[str] = []
-
-    for op, i1, i2, j1, j2 in matcher.get_opcodes():
-        old_seg = _html_module.escape("".join(old_chars[i1:i2]))
-        new_seg = _html_module.escape("".join(new_chars[j1:j2]))
-        if op == "equal":
-            old_parts.append(old_seg)
-            new_parts.append(new_seg)
-        elif op == "replace":
-            old_parts.append(f'<span class="del">{old_seg}</span>')
-            new_parts.append(f'<span class="ins">{new_seg}</span>')
-        elif op == "delete":
-            old_parts.append(f'<span class="del">{old_seg}</span>')
-        elif op == "insert":
-            new_parts.append(f'<span class="ins">{new_seg}</span>')
-
-    return "".join(old_parts), "".join(new_parts)
-
-
-_DIFF_TABLE_STYLE = """
-<style>
-.diff-wrap{overflow-x:auto;margin:8px 0}
-.diff-tbl{border-collapse:collapse;width:100%;font-size:13px;font-family:sans-serif}
-.diff-tbl th{background:#f5f5f5;padding:6px 10px;text-align:left;border:1px solid #ddd;white-space:nowrap}
-.diff-tbl td{padding:6px 10px;border:1px solid #ddd;vertical-align:top}
-.diff-tbl .c-num{width:36px;font-weight:700;color:#555;white-space:nowrap}
-.diff-tbl .c-tag{width:110px;white-space:nowrap}
-.diff-tbl .c-old{background:#fff5f5}
-.diff-tbl .c-new{background:#f5fff5}
-.diff-tbl .c-note{color:#666;font-size:12px}
-span.del{background:#ffc8c8;text-decoration:line-through}
-span.ins{background:#c8ffc8}
-</style>
-"""
-
-
-def generate_diff_html(diff_items: List[DiffItem]) -> str:
-    """
-    Generate an HTML string containing a side-by-side diff table for *diff_items*.
+    Generate a Markdown string containing a side-by-side diff table for *diff_items*.
 
     The table has columns: #, 类型, ❌ 原文, ✅ 建议, 说明.
-    Character-level differences are highlighted with ``<span class="del/ins">``.
+    Rendered directly in Chainlit message content as a GFM table.
     """
-    rows: List[str] = []
+    lines: List[str] = [
+        "| # | 类型 | ❌ 原文 | ✅ 建议 | 说明 |",
+        "|---|------|--------|--------|------|",
+    ]
     for item in diff_items:
         icon = _ISSUE_ICONS.get(item.issue_type, "📝")
         sev = _SEVERITY_ICONS.get(item.severity, "")
         label = _ISSUE_LABELS.get(item.issue_type, item.issue_type)
-        location = f"<br><small>段落 {item.para_idx}</small>" if item.para_idx is not None else ""
+        location = f" (段落{item.para_idx})" if item.para_idx is not None else ""
 
-        old_html, new_html = _char_diff_html(item.evidence, item.suggestion)
-        note_html = _html_module.escape(item.rationale)
+        # Escape pipe chars in cell content so they don't break the table
+        def _esc(s: str) -> str:
+            return s.replace("|", "\\|").replace("\n", " ")
 
-        rows.append(
-            f"<tr>"
-            f'<td class="c-num">#{item.number}</td>'
-            f'<td class="c-tag">{icon}{sev} {_html_module.escape(label)}{location}</td>'
-            f'<td class="c-old">{old_html}</td>'
-            f'<td class="c-new">{new_html}</td>'
-            f'<td class="c-note">{note_html}</td>'
-            f"</tr>"
+        lines.append(
+            f"| **#{item.number}** "
+            f"| {icon}{sev} {_esc(label)}{_esc(location)} "
+            f"| `{_esc(item.evidence)}` "
+            f"| `{_esc(item.suggestion)}` "
+            f"| {_esc(item.rationale)} |"
+        )
+    return "\n".join(lines)
+
+
+# Keep the old HTML generator for backwards compatibility if needed elsewhere
+def generate_diff_html(diff_items: List[DiffItem]) -> str:
+    """Alias that returns markdown; HTML rendering was replaced with markdown tables."""
+    return generate_diff_markdown(diff_items)
+
+
+def generate_diff_cards_markdown(
+    diff_items: List[DiffItem],
+    paragraph_texts: Optional[List[str]] = None,
+) -> str:
+    """
+    Generate a GFM markdown string with one "card" per diff item that renders
+    visually in the Chainlit browser UI without any download:
+
+    - Paragraph context shown as a Markdown blockquote.
+    - Original fragment rendered with GFM **~~strikethrough~~** (displays as
+      red-ish struck-out text in most renderers).
+    - Suggested replacement rendered as **bold**.
+    - Rationale shown as italic below the diff line.
+
+    :param diff_items:       List of DiffItem objects to render.
+    :param paragraph_texts:  Optional list of raw paragraph strings from the
+                             formatted document (indexed by paragraph position).
+                             When supplied, the relevant paragraph is quoted above
+                             the diff line so the reviewer sees the full context.
+    """
+    blocks: List[str] = []
+    for item in diff_items:
+        icon = _ISSUE_ICONS.get(item.issue_type, "📝")
+        sev = _SEVERITY_ICONS.get(item.severity, "")
+        label = _ISSUE_LABELS.get(item.issue_type, item.issue_type)
+        loc = f"（段落 {item.para_idx}）" if item.para_idx is not None else ""
+
+        # ── Escape markdown special chars inside variable content ────────────
+        def _esc(s: str) -> str:
+            return (
+                s.replace("\\", "\\\\")
+                .replace("`", "\\`")
+                .replace("*", "\\*")
+                .replace("_", "\\_")
+                .replace("~", "\\~")
+                .replace("[", "\\[")
+                .replace("]", "\\]")
+                .replace("\n", " ")
+            )
+
+        card_lines: List[str] = [
+            f"**#{item.number}** {icon}{sev} `{label}`{loc}",
+        ]
+
+        # Paragraph context as a blockquote
+        para_idx = item.para_idx
+        if (
+            para_idx is not None
+            and paragraph_texts is not None
+            and 0 <= para_idx < len(paragraph_texts)
+        ):
+            ctx = paragraph_texts[para_idx].strip()
+            if len(ctx) > 120:
+                ctx = ctx[:120] + "…"
+            if ctx:
+                card_lines.append(f"> {ctx}")
+
+        # Diff line: ~~evidence~~ → **suggestion**
+        card_lines.append(
+            f"~~{_esc(item.evidence)}~~ → **{_esc(item.suggestion)}**"
         )
 
-    header = (
-        "<tr>"
-        "<th>#</th>"
-        "<th>类型</th>"
-        "<th>❌ 原文</th>"
-        "<th>✅ 建议</th>"
-        "<th>说明</th>"
-        "</tr>"
-    )
-    return (
-        f"{_DIFF_TABLE_STYLE}"
-        f'<div class="diff-wrap">'
-        f'<table class="diff-tbl">'
-        f"<thead>{header}</thead>"
-        f"<tbody>{''.join(rows)}</tbody>"
-        f"</table></div>"
-    )
+        # Rationale
+        if item.rationale:
+            card_lines.append(f"💡 _{_esc(item.rationale)}_")
+
+        blocks.append("\n\n".join(card_lines))
+
+    return "\n\n---\n\n".join(blocks)
+
+
+# ---------------------------------------------------------------------------
+# Redline Word document (tracked-changes-style preview)
+# ---------------------------------------------------------------------------
+
+_DEL_COLOR = (0xC0, 0x00, 0x00)   # red
+_INS_COLOR = (0x00, 0x70, 0x00)   # green
+_NOTE_COLOR = (0x66, 0x66, 0x66)  # grey
+_ISSUE_LABELS_ZH: Dict[str, str] = {
+    "typo": "错别字",
+    "punctuation": "标点符号",
+    "standardization": "规范性",
+}
+_SEVERITY_ZH: Dict[str, str] = {
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+}
+
+
+def generate_redline_docx(diff_items: List[DiffItem], out_bytes: bytes) -> bytes:
+    """
+    Generate a "redline" Word document that shows each LLM proofread suggestion
+    as a visual before/after diff:
+
+    - Original text: **red strikethrough**
+    - Suggested replacement: **green underline**
+    - Paragraph context from *out_bytes* (the formatted document) is shown above
+      each change so the reviewer knows exactly where it falls.
+
+    Returns the redline .docx as raw bytes ready to attach as a cl.File.
+    """
+    from docx import Document
+    from docx.shared import RGBColor, Pt
+
+    # ── Load paragraph context from formatted document ───────────────────────
+    paragraphs: list = []
+    if out_bytes:
+        _tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as f:
+                f.write(out_bytes)
+                _tmp = f.name
+            from core.docx_utils import iter_all_paragraphs
+            paragraphs = iter_all_paragraphs(Document(_tmp))
+        except Exception:
+            pass
+        finally:
+            if _tmp:
+                try:
+                    os.remove(_tmp)
+                except OSError:
+                    pass
+
+    # ── Build the redline document ───────────────────────────────────────────
+    doc = Document()
+    doc.add_heading("LLM 校对建议 — 修订预览", 1)
+
+    for item in diff_items:
+        label = _ISSUE_LABELS_ZH.get(item.issue_type, item.issue_type)
+        sev = _SEVERITY_ZH.get(item.severity, item.severity)
+        loc = f"（段落 {item.para_idx}）" if item.para_idx is not None else ""
+
+        # ── Section heading ──────────────────────────────────────────────────
+        p_head = doc.add_paragraph()
+        r_head = p_head.add_run(f"#{item.number}  [{label} · 严重性: {sev}]{loc}")
+        r_head.bold = True
+
+        # ── Paragraph context ────────────────────────────────────────────────
+        para_idx = item.para_idx
+        if para_idx is not None and 0 <= para_idx < len(paragraphs):
+            ctx = paragraphs[para_idx].text
+            if len(ctx) > 150:
+                ctx = ctx[:150] + "…"
+            p_ctx = doc.add_paragraph()
+            r_ctx = p_ctx.add_run("原段落：" + ctx)
+            r_ctx.font.color.rgb = RGBColor(*_NOTE_COLOR)
+            r_ctx.font.size = Pt(9)
+
+        # ── Diff line: red strikethrough → green underline ───────────────────
+        p_diff = doc.add_paragraph()
+        p_diff.add_run("修改：")
+        r_del = p_diff.add_run(item.evidence)
+        r_del.font.color.rgb = RGBColor(*_DEL_COLOR)
+        r_del.font.strike = True
+        p_diff.add_run("  →  ")
+        r_ins = p_diff.add_run(item.suggestion)
+        r_ins.font.color.rgb = RGBColor(*_INS_COLOR)
+        r_ins.font.underline = True
+
+        # ── Rationale ────────────────────────────────────────────────────────
+        if item.rationale:
+            p_note = doc.add_paragraph()
+            r_note = p_note.add_run(f"说明：{item.rationale}")
+            r_note.font.color.rgb = RGBColor(*_NOTE_COLOR)
+            r_note.font.size = Pt(10)
+
+        doc.add_paragraph()  # blank spacer between items
+
+    buf = _io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
