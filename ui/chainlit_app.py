@@ -5,7 +5,7 @@ Chainlit 前端入口 — MyAgent ReAct 文档格式化（增强版）。
 功能：
   1. 点击按钮选择排版模式（无需手动输入命令）。
   2. 直接上传 .docx 文件即可处理，无需同时输入文字。
-  3. Diff 视图：以 Markdown 表格展示 LLM 校对建议。
+  3. Diff 视图：Markdown 表格 + 可下载的修订预览 Word 文档（红色删除线/绿色下划线）。
   4. 通用聊天：不上传文件时，支持直接与 LLM 对话（流式输出）。
 
 启动方式：
@@ -34,6 +34,7 @@ from ui.diff_utils import (
     apply_and_save_proofread,
     generate_structural_diff,
     generate_diff_markdown,
+    generate_redline_docx,
     _ACCEPT_ALL_PATTERNS,
     DiffItem,
 )
@@ -228,7 +229,7 @@ async def _process_file(
     cl.user_session.set(_KEY_DIFF_ITEMS, diff_items)
 
     if diff_items:
-        await _show_diff_cards(diff_items)
+        await _show_diff_cards(diff_items, out_bytes, filename)
         cl.user_session.set(_KEY_STATE, "awaiting_feedback")
         await cl.Message(
             content=(
@@ -309,11 +310,34 @@ async def _run_react_with_steps(
                     pass
 
 
-async def _show_diff_cards(diff_items: List[DiffItem]) -> None:
-    """Display diff items as a markdown GFM table in the message body."""
+async def _show_diff_cards(
+    diff_items: List[DiffItem],
+    out_bytes: bytes,
+    filename: str,
+) -> None:
+    """Display diff items as a markdown GFM table and attach a redline Word document."""
     table = generate_diff_markdown(diff_items)
+
+    # Generate the redline .docx preview
+    try:
+        redline_bytes = generate_redline_docx(diff_items, out_bytes)
+        base_name = os.path.splitext(os.path.basename(filename))[0]
+        redline_file = cl.File(
+            name=f"{base_name}_redline.docx",
+            content=redline_bytes,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        elements = [redline_file]
+    except Exception:
+        elements = []
+
     await cl.Message(
-        content=f"### 🔍 LLM 校对建议（共 {len(diff_items)} 条）\n\n{table}",
+        content=(
+            f"### 🔍 LLM 校对建议（共 {len(diff_items)} 条）\n\n"
+            f"{table}\n\n"
+            "📄 下方附件为 **修订预览文档**（红色删除线 = 原文，绿色下划线 = 建议），可下载在 Word 中查看。"
+        ),
+        elements=elements,
     ).send()
 
 

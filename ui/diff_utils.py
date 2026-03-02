@@ -12,6 +12,7 @@ Provides:
 """
 from __future__ import annotations
 
+import io as _io
 import os
 import re
 import tempfile
@@ -317,6 +318,109 @@ def generate_diff_markdown(diff_items: List[DiffItem]) -> str:
 def generate_diff_html(diff_items: List[DiffItem]) -> str:
     """Alias that returns markdown; HTML rendering was replaced with markdown tables."""
     return generate_diff_markdown(diff_items)
+
+
+# ---------------------------------------------------------------------------
+# Redline Word document (tracked-changes-style preview)
+# ---------------------------------------------------------------------------
+
+_DEL_COLOR = (0xC0, 0x00, 0x00)   # red
+_INS_COLOR = (0x00, 0x70, 0x00)   # green
+_NOTE_COLOR = (0x66, 0x66, 0x66)  # grey
+_ISSUE_LABELS_ZH: Dict[str, str] = {
+    "typo": "错别字",
+    "punctuation": "标点符号",
+    "standardization": "规范性",
+}
+_SEVERITY_ZH: Dict[str, str] = {
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+}
+
+
+def generate_redline_docx(diff_items: List[DiffItem], out_bytes: bytes) -> bytes:
+    """
+    Generate a "redline" Word document that shows each LLM proofread suggestion
+    as a visual before/after diff:
+
+    - Original text: **red strikethrough**
+    - Suggested replacement: **green underline**
+    - Paragraph context from *out_bytes* (the formatted document) is shown above
+      each change so the reviewer knows exactly where it falls.
+
+    Returns the redline .docx as raw bytes ready to attach as a cl.File.
+    """
+    from docx import Document
+    from docx.shared import RGBColor, Pt
+
+    # ── Load paragraph context from formatted document ───────────────────────
+    paragraphs: list = []
+    if out_bytes:
+        _tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as f:
+                f.write(out_bytes)
+                _tmp = f.name
+            from core.docx_utils import iter_all_paragraphs
+            paragraphs = iter_all_paragraphs(Document(_tmp))
+        except Exception:
+            pass
+        finally:
+            if _tmp:
+                try:
+                    os.remove(_tmp)
+                except OSError:
+                    pass
+
+    # ── Build the redline document ───────────────────────────────────────────
+    doc = Document()
+    doc.add_heading("LLM 校对建议 — 修订预览", 1)
+
+    for item in diff_items:
+        label = _ISSUE_LABELS_ZH.get(item.issue_type, item.issue_type)
+        sev = _SEVERITY_ZH.get(item.severity, item.severity)
+        loc = f"（段落 {item.para_idx}）" if item.para_idx is not None else ""
+
+        # ── Section heading ──────────────────────────────────────────────────
+        p_head = doc.add_paragraph()
+        r_head = p_head.add_run(f"#{item.number}  [{label} · 严重性: {sev}]{loc}")
+        r_head.bold = True
+
+        # ── Paragraph context ────────────────────────────────────────────────
+        para_idx = item.para_idx
+        if para_idx is not None and 0 <= para_idx < len(paragraphs):
+            ctx = paragraphs[para_idx].text
+            if len(ctx) > 150:
+                ctx = ctx[:150] + "…"
+            p_ctx = doc.add_paragraph()
+            r_ctx = p_ctx.add_run("原段落：" + ctx)
+            r_ctx.font.color.rgb = RGBColor(*_NOTE_COLOR)
+            r_ctx.font.size = Pt(9)
+
+        # ── Diff line: red strikethrough → green underline ───────────────────
+        p_diff = doc.add_paragraph()
+        p_diff.add_run("修改：")
+        r_del = p_diff.add_run(item.evidence)
+        r_del.font.color.rgb = RGBColor(*_DEL_COLOR)
+        r_del.font.strike = True
+        p_diff.add_run("  →  ")
+        r_ins = p_diff.add_run(item.suggestion)
+        r_ins.font.color.rgb = RGBColor(*_INS_COLOR)
+        r_ins.font.underline = True
+
+        # ── Rationale ────────────────────────────────────────────────────────
+        if item.rationale:
+            p_note = doc.add_paragraph()
+            r_note = p_note.add_run(f"说明：{item.rationale}")
+            r_note.font.color.rgb = RGBColor(*_NOTE_COLOR)
+            r_note.font.size = Pt(10)
+
+        doc.add_paragraph()  # blank spacer between items
+
+    buf = _io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
