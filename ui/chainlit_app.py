@@ -2,11 +2,11 @@
 """
 Chainlit 前端入口 — MyAgent ReAct 文档格式化（增强版）。
 
-新增功能：
-  1. ReAct 模式：以 cl.Step 实时展示每轮 Thought / Action / Observation。
-  2. LLM 校对建议自动应用：将 evidence→suggestion 文本替换直接写入输出文档。
-  3. Diff 界面：将每条修改建议编号展示，用户可说 "不要修改#3" 拒绝特定修改。
-  4. 自然语言解析：支持 "不要修改第3条和第5条"、"全部接受"、"全部拒绝" 等表达。
+功能：
+  1. 点击按钮选择排版模式（无需手动输入命令）。
+  2. 直接上传 .docx 文件即可处理，无需同时输入文字。
+  3. Diff 视图：以 HTML 并排表格展示 LLM 校对建议（字符级高亮）。
+  4. 通用聊天：不上传文件时，支持直接与 LLM 对话。
 
 启动方式：
     chainlit run ui/chainlit_app.py
@@ -26,13 +26,14 @@ try:
 except ImportError as e:
     raise ImportError("chainlit 未安装，请运行: pip install chainlit") from e
 
-from config import LLM_MODE, REACT_MAX_ITERS
+from config import LLM_MODE, REACT_MAX_ITERS, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 from service.format_service import format_docx_bytes
 from ui.diff_utils import (
     build_diff_items,
     parse_rejected_numbers,
     apply_and_save_proofread,
     generate_structural_diff,
+    generate_diff_html,
     DiffItem,
 )
 
@@ -49,25 +50,78 @@ _KEY_FILENAME = "filename"
 _KEY_ISSUES = "pending_issues"
 _KEY_DIFF_ITEMS = "diff_items"
 _KEY_REPORT = "pending_report"
+_KEY_CHAT_HISTORY = "chat_history"
+
+# Maximum number of chat messages (user+assistant turns) to keep in session context.
+_MAX_CHAT_HISTORY = 20
+
+
+def _make_mode_actions() -> List[cl.Action]:
+    """Return the four mode-selection action buttons."""
+    return [
+        cl.Action(name="mode_rule",   value="rule",   label="📐 Rule 模式",
+                  description="纯规则排版，速度最快，无需 LLM Key"),
+        cl.Action(name="mode_llm",    value="llm",    label="🤖 LLM 模式",
+                  description="LLM 辅助排版（需 LLM_API_KEY）"),
+        cl.Action(name="mode_hybrid", value="hybrid", label="⚡ Hybrid（推荐）",
+                  description="规则 + LLM 混合，兼顾速度与质量"),
+        cl.Action(name="mode_react",  value="react",  label="🔁 ReAct 模式",
+                  description="多轮迭代，适合复杂文档"),
+    ]
 
 
 @cl.on_chat_start
 async def on_chat_start():
-    await cl.Message(
-        content=(
-            "👋 欢迎使用 **MyAgent 文档格式化智能体**！\n\n"
-            "### 使用流程\n"
-            "1. 先发送排版模式：`rule` / `llm` / `hybrid` / `react`\n"
-            "2. 上传 `.docx` 文件，Agent 将自动排版并展示修改建议（Diff）\n"
-            "3. 如不满意某条修改，直接回复 `不要修改#3`（可同时拒绝多条，如 `不要修改#2 #5`）\n"
-            "4. 回复 `全部接受` 或 `确认` 应用所有建议，`全部拒绝` 保留原文\n\n"
-            f"当前默认模式：**{LLM_MODE}**"
-        )
-    ).send()
     cl.user_session.set(_KEY_LABEL_MODE, LLM_MODE)
     cl.user_session.set(_KEY_USE_REACT, False)
     cl.user_session.set(_KEY_MAX_ITERS, REACT_MAX_ITERS)
     cl.user_session.set(_KEY_STATE, "ready")
+    cl.user_session.set(_KEY_CHAT_HISTORY, [])
+
+    await cl.Message(
+        content=(
+            "👋 欢迎使用 **MyAgent 文档格式化智能体**！\n\n"
+            f"当前模式：**{LLM_MODE}**。点击下方按钮切换模式，然后直接上传 `.docx` 文件即可开始排版。\n\n"
+            "💬 也可以直接发送消息与我对话。"
+        ),
+        actions=_make_mode_actions(),
+    ).send()
+
+
+# ── Mode action callbacks ────────────────────────────────────────────────────
+
+async def _set_mode(value: str, action: cl.Action) -> None:
+    if value == "react":
+        cl.user_session.set(_KEY_LABEL_MODE, "rule")
+        cl.user_session.set(_KEY_USE_REACT, True)
+    else:
+        cl.user_session.set(_KEY_LABEL_MODE, value)
+        cl.user_session.set(_KEY_USE_REACT, False)
+    await cl.Message(
+        content=f"✅ 已切换到 **{value}** 模式。请直接上传 `.docx` 文件开始排版。",
+        actions=_make_mode_actions(),
+    ).send()
+    await action.remove()
+
+
+@cl.action_callback("mode_rule")
+async def on_mode_rule(action: cl.Action):
+    await _set_mode("rule", action)
+
+
+@cl.action_callback("mode_llm")
+async def on_mode_llm(action: cl.Action):
+    await _set_mode("llm", action)
+
+
+@cl.action_callback("mode_hybrid")
+async def on_mode_hybrid(action: cl.Action):
+    await _set_mode("hybrid", action)
+
+
+@cl.action_callback("mode_react")
+async def on_mode_react(action: cl.Action):
+    await _set_mode("react", action)
 
 
 @cl.on_message
@@ -78,43 +132,51 @@ async def on_message(message: cl.Message):
         await _handle_feedback(message)
         return
 
-    text = message.content.strip().lower()
+    text = message.content.strip()
 
-    # ── Mode selection ──────────────────────────────────────────────────────
-    if text in LABEL_MODES:
-        if text == "react":
+    # ── Mode selection via text (kept for backwards compatibility) ───────────
+    if text.lower() in LABEL_MODES:
+        if text.lower() == "react":
             cl.user_session.set(_KEY_LABEL_MODE, "rule")
             cl.user_session.set(_KEY_USE_REACT, True)
         else:
-            cl.user_session.set(_KEY_LABEL_MODE, text)
+            cl.user_session.set(_KEY_LABEL_MODE, text.lower())
             cl.user_session.set(_KEY_USE_REACT, False)
-        await cl.Message(content=f"✅ 已切换到 **{text}** 模式，请上传 .docx 文件。").send()
+        await cl.Message(
+            content=f"✅ 已切换到 **{text.lower()}** 模式，请上传 .docx 文件。",
+            actions=_make_mode_actions(),
+        ).send()
         return
 
-    # ── File upload ──────────────────────────────────────────────────────────
+    # ── File upload (text is optional) ──────────────────────────────────────
     docx_file = None
     for f in (message.elements or []):
         if hasattr(f, "name") and f.name.lower().endswith(".docx"):
             docx_file = f
             break
 
-    if docx_file is None:
-        await cl.Message(
-            content="⚠️ 请上传 .docx 文件，或发送模式选择（rule / llm / hybrid / react）。"
-        ).send()
+    if docx_file is not None:
+        label_mode = cl.user_session.get(_KEY_LABEL_MODE, LLM_MODE)
+        use_react = cl.user_session.get(_KEY_USE_REACT, False)
+        max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
+
+        with open(docx_file.path, "rb") as fp:
+            input_bytes = fp.read()
+
+        cl.user_session.set(_KEY_INPUT_BYTES, input_bytes)
+        cl.user_session.set(_KEY_FILENAME, docx_file.name)
+
+        await _process_file(input_bytes, docx_file.name, label_mode, use_react, max_iters)
         return
 
-    label_mode = cl.user_session.get(_KEY_LABEL_MODE, LLM_MODE)
-    use_react = cl.user_session.get(_KEY_USE_REACT, False)
-    max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
-
-    with open(docx_file.path, "rb") as fp:
-        input_bytes = fp.read()
-
-    cl.user_session.set(_KEY_INPUT_BYTES, input_bytes)
-    cl.user_session.set(_KEY_FILENAME, docx_file.name)
-
-    await _process_file(input_bytes, docx_file.name, label_mode, use_react, max_iters)
+    # ── General chat fallback ────────────────────────────────────────────────
+    if text:
+        await _handle_chat(text)
+    else:
+        await cl.Message(
+            content="💡 请上传 `.docx` 文件开始排版，或直接发送消息与我对话。",
+            actions=_make_mode_actions(),
+        ).send()
 
 
 # ── Core processing ────────────────────────────────────────────────────────
@@ -246,12 +308,54 @@ async def _run_react_with_steps(
 
 
 async def _show_diff_cards(diff_items: List[DiffItem]) -> None:
-    """Display each diff item as a numbered card."""
-    lines = [f"### 🔍 LLM 校对建议（共 {len(diff_items)} 条）\n"]
-    for item in diff_items:
-        lines.append(item.to_markdown())
-        lines.append("")   # blank line between cards
-    await cl.Message(content="\n".join(lines)).send()
+    """Display diff items as an HTML side-by-side diff table."""
+    html_content = generate_diff_html(diff_items)
+    await cl.Message(
+        content=f"### 🔍 LLM 校对建议（共 {len(diff_items)} 条）",
+        elements=[cl.Text(name="diff_view", content=html_content, display="inline")],
+    ).send()
+
+
+# ── General chat ────────────────────────────────────────────────────────────
+
+async def _handle_chat(text: str) -> None:
+    """Forward user message to the LLM for a general chat response."""
+    if not LLM_API_KEY:
+        await cl.Message(
+            content=(
+                "💬 未配置 LLM API Key，暂无法进行对话。\n"
+                "请上传 `.docx` 文件进行格式化，或点击按钮切换到 `rule` 模式（无需 Key）。"
+            ),
+            actions=_make_mode_actions(),
+        ).send()
+        return
+
+    import openai as _openai
+
+    history: List[dict] = cl.user_session.get(_KEY_CHAT_HISTORY, [])
+    history.append({"role": "user", "content": text})
+
+    try:
+        client = _openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        response = await client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是 MyAgent 文档格式化助手。"
+                        "你可以帮助用户了解文档格式化知识、解答关于本工具的使用问题，也可以进行一般性的中文对话。"
+                    ),
+                },
+                *history[-_MAX_CHAT_HISTORY:],
+            ],
+        )
+        reply = response.choices[0].message.content or ""
+        history.append({"role": "assistant", "content": reply})
+        cl.user_session.set(_KEY_CHAT_HISTORY, history)
+        await cl.Message(content=reply).send()
+    except Exception as e:
+        await cl.Message(content=f"💬 对话失败：{e}").send()
 
 
 # ── User feedback handling ─────────────────────────────────────────────────
