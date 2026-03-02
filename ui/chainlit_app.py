@@ -19,7 +19,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import json
 import tempfile
-from typing import List, Optional, Set
+from typing import List, Set
 
 try:
     import chainlit as cl
@@ -33,9 +33,6 @@ from ui.diff_utils import (
     parse_rejected_numbers,
     apply_and_save_proofread,
     generate_structural_diff,
-    generate_diff_markdown,
-    generate_diff_cards_markdown,
-    generate_redline_docx,
     _ACCEPT_ALL_PATTERNS,
     DiffItem,
 )
@@ -230,7 +227,7 @@ async def _process_file(
     cl.user_session.set(_KEY_DIFF_ITEMS, diff_items)
 
     if diff_items:
-        await _show_diff_cards(diff_items, out_bytes, filename)
+        await _show_diff_cards(diff_items)
         cl.user_session.set(_KEY_STATE, "awaiting_feedback")
         await cl.Message(
             content=(
@@ -311,38 +308,13 @@ async def _run_react_with_steps(
                     pass
 
 
-async def _show_diff_cards(
-    diff_items: List[DiffItem],
-    out_bytes: bytes,
-    filename: str,
-) -> None:
-    """Display diff items as HTML diff cards (Word-style red/green) rendered in the browser."""
-    # Extract paragraph texts from the formatted document for context display
-    paragraph_texts: Optional[List[str]] = None
-    _tmp = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as _f:
-            _tmp = _f.name          # capture name before write so cleanup always works
-            _f.write(out_bytes)
-        from docx import Document as _Document
-        from core.docx_utils import iter_all_paragraphs
-        paragraph_texts = [p.text for p in iter_all_paragraphs(_Document(_tmp))]
-    except Exception:
-        pass
-    finally:
-        if _tmp:
-            try:
-                os.remove(_tmp)
-            except OSError:
-                pass
-
-    cards = generate_diff_cards_markdown(diff_items, paragraph_texts)
-    await cl.Message(
-        content=(
-            f"### 🔍 LLM 校对建议（共 {len(diff_items)} 条）\n\n"
-            f"{cards}"
-        ),
-    ).send()
+async def _show_diff_cards(diff_items: List[DiffItem]) -> None:
+    """Display diff items as plain markdown: original text and suggestion on two lines each."""
+    lines = [f"### 🔍 LLM 校对建议（共 {len(diff_items)} 条）\n"]
+    for item in diff_items:
+        lines.append(item.to_markdown())
+        lines.append("")  # blank line between items
+    await cl.Message(content="\n".join(lines)).send()
 
 
 # ── General chat ────────────────────────────────────────────────────────────

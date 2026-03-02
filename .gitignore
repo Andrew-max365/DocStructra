@@ -20,3 +20,4 @@ venv/
 .coverage
 htmlcov/
 .chainlit/
+!.chainlit/config.toml

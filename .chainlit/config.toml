@@ -1,0 +1,16 @@
+[project]
+# Whether to enable telemetry (default: true). No personal data is collected.
+enable_telemetry = false
+
+[features]
+# Allow users to send messages without any text (e.g. file-only uploads).
+# This ensures the send button activates when a .docx file is attached even
+# without accompanying text.
+allow_empty_message = true
+
+# Allow users to upload files with messages.
+multi_modal = true
+
+[UI]
+name = "MyAgent 文档格式化智能体"
+description = "上传 Word 文档（.docx），智能体会进行结构诊断与自动修复，并输出可解释报告与排版后的文档。"
