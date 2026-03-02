@@ -325,46 +325,40 @@ def generate_diff_cards_markdown(
     paragraph_texts: Optional[List[str]] = None,
 ) -> str:
     """
-    Generate a GFM markdown string with one "card" per diff item that renders
-    visually in the Chainlit browser UI without any download:
+    Generate an HTML string with one card per diff item that renders as a
+    Word-style Track-Changes diff directly in the Chainlit browser UI:
 
-    - Paragraph context shown as a Markdown blockquote.
-    - Original fragment rendered with GFM **~~strikethrough~~** (displays as
-      red-ish struck-out text in most renderers).
-    - Suggested replacement rendered as **bold**.
-    - Rationale shown as italic below the diff line.
+    - Paragraph context shown in a grey italic quote line.
+    - Original fragment: red background + red strikethrough text.
+    - Suggested replacement: green background + green underlined text.
+    - Rationale shown as a small grey note.
 
     :param diff_items:       List of DiffItem objects to render.
     :param paragraph_texts:  Optional list of raw paragraph strings from the
                              formatted document (indexed by paragraph position).
-                             When supplied, the relevant paragraph is quoted above
+                             When supplied, the relevant paragraph is shown above
                              the diff line so the reviewer sees the full context.
     """
-    blocks: List[str] = []
+
+    def _he(s: str) -> str:
+        """Escape HTML special characters."""
+        return (
+            s.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("\n", " ")
+        )
+
+    parts: List[str] = []
     for item in diff_items:
         icon = _ISSUE_ICONS.get(item.issue_type, "📝")
         sev = _SEVERITY_ICONS.get(item.severity, "")
         label = _ISSUE_LABELS.get(item.issue_type, item.issue_type)
         loc = f"（段落 {item.para_idx}）" if item.para_idx is not None else ""
 
-        # ── Escape markdown special chars inside variable content ────────────
-        def _esc(s: str) -> str:
-            return (
-                s.replace("\\", "\\\\")
-                .replace("`", "\\`")
-                .replace("*", "\\*")
-                .replace("_", "\\_")
-                .replace("~", "\\~")
-                .replace("[", "\\[")
-                .replace("]", "\\]")
-                .replace("\n", " ")
-            )
-
-        card_lines: List[str] = [
-            f"**#{item.number}** {icon}{sev} `{label}`{loc}",
-        ]
-
-        # Paragraph context as a blockquote
+        # Paragraph context
+        ctx_html = ""
         para_idx = item.para_idx
         if (
             para_idx is not None
@@ -372,23 +366,57 @@ def generate_diff_cards_markdown(
             and 0 <= para_idx < len(paragraph_texts)
         ):
             ctx = paragraph_texts[para_idx].strip()
-            if len(ctx) > 120:
-                ctx = ctx[:120] + "…"
+            if len(ctx) > 150:
+                ctx = ctx[:150] + "…"
             if ctx:
-                card_lines.append(f"> {ctx}")
+                ctx_html = (
+                    f'<div style="color:#888;font-style:italic;margin:4px 0 6px 0;'
+                    f'border-left:3px solid #ccc;padding-left:8px;font-size:0.9em;">'
+                    f'📄 {_he(ctx)}</div>'
+                )
 
-        # Diff line: ~~evidence~~ → **suggestion**
-        card_lines.append(
-            f"~~{_esc(item.evidence)}~~ → **{_esc(item.suggestion)}**"
+        # Diff line: red-strikethrough original → green-underline suggestion
+        del_html = (
+            f'<span style="background:#fff0f0;color:#c00000;'
+            f'text-decoration:line-through;padding:1px 3px;border-radius:3px;">'
+            f'{_he(item.evidence)}</span>'
+        )
+        ins_html = (
+            f'<span style="background:#f0fff0;color:#007000;'
+            f'text-decoration:underline;padding:1px 3px;border-radius:3px;">'
+            f'{_he(item.suggestion)}</span>'
+        )
+        diff_line = (
+            f'<div style="margin:6px 0;font-size:1em;">'
+            f'{del_html}'
+            f'<span style="margin:0 8px;color:#555;">→</span>'
+            f'{ins_html}'
+            f'</div>'
         )
 
         # Rationale
+        note_html = ""
         if item.rationale:
-            card_lines.append(f"💡 _{_esc(item.rationale)}_")
+            note_html = (
+                f'<div style="color:#666;font-size:0.85em;margin-top:4px;">'
+                f'💡 {_he(item.rationale)}</div>'
+            )
 
-        blocks.append("\n\n".join(card_lines))
+        card = (
+            f'<div style="border:1px solid #ddd;border-radius:6px;'
+            f'padding:10px 14px;margin:8px 0;background:#fafafa;">'
+            f'<div style="font-weight:bold;margin-bottom:4px;">'
+            f'#{item.number} {icon}{sev} <code style="font-size:0.85em;">{_he(label)}</code>'
+            f'<span style="color:#999;font-size:0.8em;margin-left:6px;">{_he(loc)}</span>'
+            f'</div>'
+            f'{ctx_html}'
+            f'{diff_line}'
+            f'{note_html}'
+            f'</div>'
+        )
+        parts.append(card)
 
-    return "\n\n---\n\n".join(blocks)
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
