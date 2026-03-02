@@ -5,8 +5,8 @@ Chainlit 前端入口 — MyAgent ReAct 文档格式化（增强版）。
 功能：
   1. 点击按钮选择排版模式（无需手动输入命令）。
   2. 直接上传 .docx 文件即可处理，无需同时输入文字。
-  3. Diff 视图：以 HTML 并排表格展示 LLM 校对建议（字符级高亮）。
-  4. 通用聊天：不上传文件时，支持直接与 LLM 对话。
+  3. Diff 视图：以 Markdown 表格展示 LLM 校对建议。
+  4. 通用聊天：不上传文件时，支持直接与 LLM 对话（流式输出）。
 
 启动方式：
     chainlit run ui/chainlit_app.py
@@ -33,7 +33,8 @@ from ui.diff_utils import (
     parse_rejected_numbers,
     apply_and_save_proofread,
     generate_structural_diff,
-    generate_diff_html,
+    generate_diff_markdown,
+    _ACCEPT_ALL_PATTERNS,
     DiffItem,
 )
 
@@ -59,14 +60,14 @@ _MAX_CHAT_HISTORY = 20
 def _make_mode_actions() -> List[cl.Action]:
     """Return the four mode-selection action buttons."""
     return [
-        cl.Action(name="mode_rule",   value="rule",   label="📐 Rule 模式",
-                  description="纯规则排版，速度最快，无需 LLM Key"),
-        cl.Action(name="mode_llm",    value="llm",    label="🤖 LLM 模式",
-                  description="LLM 辅助排版（需 LLM_API_KEY）"),
-        cl.Action(name="mode_hybrid", value="hybrid", label="⚡ Hybrid（推荐）",
-                  description="规则 + LLM 混合，兼顾速度与质量"),
-        cl.Action(name="mode_react",  value="react",  label="🔁 ReAct 模式",
-                  description="多轮迭代，适合复杂文档"),
+        cl.Action(name="mode_rule",   payload={"mode": "rule"},   label="📐 Rule 模式",
+                  tooltip="纯规则排版，速度最快，无需 LLM Key"),
+        cl.Action(name="mode_llm",    payload={"mode": "llm"},    label="🤖 LLM 模式",
+                  tooltip="LLM 辅助排版（需 LLM_API_KEY）"),
+        cl.Action(name="mode_hybrid", payload={"mode": "hybrid"}, label="⚡ Hybrid（推荐）",
+                  tooltip="规则 + LLM 混合，兼顾速度与质量"),
+        cl.Action(name="mode_react",  payload={"mode": "react"},  label="🔁 ReAct 模式",
+                  tooltip="多轮迭代，适合复杂文档"),
     ]
 
 
@@ -106,29 +107,36 @@ async def _set_mode(value: str, action: cl.Action) -> None:
 
 @cl.action_callback("mode_rule")
 async def on_mode_rule(action: cl.Action):
-    await _set_mode("rule", action)
+    await _set_mode(action.payload.get("mode", "rule"), action)
 
 
 @cl.action_callback("mode_llm")
 async def on_mode_llm(action: cl.Action):
-    await _set_mode("llm", action)
+    await _set_mode(action.payload.get("mode", "llm"), action)
 
 
 @cl.action_callback("mode_hybrid")
 async def on_mode_hybrid(action: cl.Action):
-    await _set_mode("hybrid", action)
+    await _set_mode(action.payload.get("mode", "hybrid"), action)
 
 
 @cl.action_callback("mode_react")
 async def on_mode_react(action: cl.Action):
-    await _set_mode("react", action)
+    await _set_mode(action.payload.get("mode", "react"), action)
 
 
 @cl.on_message
 async def on_message(message: cl.Message):
     state = cl.user_session.get(_KEY_STATE, "ready")
 
-    if state == "awaiting_feedback":
+    # Allow uploading a new file even while awaiting feedback (starts fresh)
+    docx_file = None
+    for f in (message.elements or []):
+        if hasattr(f, "name") and f.name.lower().endswith(".docx"):
+            docx_file = f
+            break
+
+    if state == "awaiting_feedback" and docx_file is None:
         await _handle_feedback(message)
         return
 
@@ -149,12 +157,6 @@ async def on_message(message: cl.Message):
         return
 
     # ── File upload (text is optional) ──────────────────────────────────────
-    docx_file = None
-    for f in (message.elements or []):
-        if hasattr(f, "name") and f.name.lower().endswith(".docx"):
-            docx_file = f
-            break
-
     if docx_file is not None:
         label_mode = cl.user_session.get(_KEY_LABEL_MODE, LLM_MODE)
         use_react = cl.user_session.get(_KEY_USE_REACT, False)
@@ -308,18 +310,17 @@ async def _run_react_with_steps(
 
 
 async def _show_diff_cards(diff_items: List[DiffItem]) -> None:
-    """Display diff items as an HTML side-by-side diff table."""
-    html_content = generate_diff_html(diff_items)
+    """Display diff items as a markdown GFM table in the message body."""
+    table = generate_diff_markdown(diff_items)
     await cl.Message(
-        content=f"### 🔍 LLM 校对建议（共 {len(diff_items)} 条）",
-        elements=[cl.Text(name="diff_view", content=html_content, display="inline")],
+        content=f"### 🔍 LLM 校对建议（共 {len(diff_items)} 条）\n\n{table}",
     ).send()
 
 
 # ── General chat ────────────────────────────────────────────────────────────
 
 async def _handle_chat(text: str) -> None:
-    """Forward user message to the LLM for a general chat response."""
+    """Forward user message to the LLM for a general chat response (streamed)."""
     if not LLM_API_KEY:
         await cl.Message(
             content=(
@@ -337,7 +338,11 @@ async def _handle_chat(text: str) -> None:
 
     try:
         client = _openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
-        response = await client.chat.completions.create(
+        # Create a placeholder message first, then populate it token by token for streaming.
+        msg = cl.Message(content="")
+        await msg.send()
+        reply_parts: List[str] = []
+        async with await client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
                 {
@@ -349,11 +354,17 @@ async def _handle_chat(text: str) -> None:
                 },
                 *history[-_MAX_CHAT_HISTORY:],
             ],
-        )
-        reply = response.choices[0].message.content or ""
+            stream=True,
+        ) as stream:
+            async for chunk in stream:
+                token = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+                if token:
+                    reply_parts.append(token)
+                    await msg.stream_token(token)
+        await msg.update()
+        reply = "".join(reply_parts)
         history.append({"role": "assistant", "content": reply})
         cl.user_session.set(_KEY_CHAT_HISTORY, history)
-        await cl.Message(content=reply).send()
     except Exception as e:
         await cl.Message(content=f"💬 对话失败：{e}").send()
 
@@ -371,6 +382,22 @@ async def _handle_feedback(message: cl.Message) -> None:
 
     total = len(diff_items)
     rejected, intent = parse_rejected_numbers(text, total)
+
+    # If the intent is neither explicit accept_all nor reject_all nor partial,
+    # prompt again rather than silently applying everything.
+    if intent == "accept_all" and not rejected:
+        # Only treat as "accept all" when the user used an explicit keyword.
+        # If no keyword matched, the user might just be chatting – reprompt.
+        if not _ACCEPT_ALL_PATTERNS.search(text):
+            await cl.Message(
+                content=(
+                    "❓ 未识别您的指令，请明确回复：\n\n"
+                    "- **`确认`** 或 **`全部接受`** → 应用所有建议\n"
+                    "- **`全部拒绝`** → 跳过所有建议\n"
+                    "- **`不要修改#3`**（可多个，如 `不要#2 #5`）→ 跳过指定建议，其余应用"
+                )
+            ).send()
+            return
 
     # Reset state before doing work (avoid double-processing)
     cl.user_session.set(_KEY_STATE, "ready")
