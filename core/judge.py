@@ -67,3 +67,56 @@ def rule_based_labels(blocks: List[Block], doc=None) -> Dict[int, str]:
             labels[b.block_id] = "body"
 
     return labels
+
+
+# ---------------------------------------------------------------------------
+# SmartJudge：规则 + LLM 置信度仲裁
+# ---------------------------------------------------------------------------
+
+# "硬核规则"正则——面向中文文档的明确章节标记。
+# 这些模式在中文学术/公文文档中具有极高的准确率，优先于 LLM 的判断。
+# 注意：当前仅覆盖中文"第X章/节"形式；英文文档标题识别依赖 detect_role 的 Word 样式规则。
+_RE_HARD_H1 = re.compile(r"^\s*第[一二三四五六七八九十百千0-9]+章")
+_RE_HARD_H2 = re.compile(r"^\s*第[一二三四五六七八九十百千0-9]+节")
+
+
+class SmartJudge:
+    """
+    规则 + LLM 仲裁器：在规则标签的基础上，用 LLM 语义结果进行校验和覆盖。
+
+    仲裁逻辑：
+    - 若 LLM 置信度 >= threshold（默认 0.8）且规则判定为 body，则信任 LLM 的特殊标签。
+    - 若文本命中"硬核规则"（如明确的"第一章"），则保守信任规则，忽略 LLM 结果。
+    - 其余情况保持规则标签。
+    """
+
+    def __init__(self, confidence_threshold: float = 0.8):
+        """
+        :param confidence_threshold: LLM 置信度阈值（默认 0.8）。
+            选择 0.8 是经验值：既保证 LLM 高确信时能纠正规则误分类，
+            又避免低置信推测引入噪声。可在实例化时根据业务需求调整。
+        """
+        self.confidence_threshold = confidence_threshold
+
+    def arbitrate(self, text: str, rule_role: str, llm_response_dict: dict) -> str:
+        """
+        对单段进行仲裁。
+
+        :param text: 段落文本
+        :param rule_role: 规则层给出的角色
+        :param llm_response_dict: LLM 给出的单段结果，含 role、confidence 字段
+        :return: 最终采用的角色
+        """
+        llm_role = llm_response_dict.get("role", rule_role)
+        confidence = float(llm_response_dict.get("confidence", 0.0))
+
+        # 硬核规则：第X章/第X节 → 绝对信任规则
+        t = (text or "").strip()
+        if _RE_HARD_H1.match(t) or _RE_HARD_H2.match(t):
+            return rule_role
+
+        # LLM 高置信 + 规则认为是 body → 信任 LLM 的特殊识别
+        if confidence >= self.confidence_threshold and rule_role == "body":
+            return llm_role
+
+        return rule_role

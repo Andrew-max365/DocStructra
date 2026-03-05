@@ -52,3 +52,4 @@ class GraphState(TypedDict):
     blocks: Any
     labels: Any
     doc: Any
+    overrides: Any

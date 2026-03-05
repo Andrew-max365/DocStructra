@@ -2,7 +2,7 @@
 # 使用 pydantic 定义结构化输出 Schema，供 LLM 输出解析使用
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -32,3 +32,27 @@ class DocumentProofread(BaseModel):
     doc_language: str = "zh"
     # 校对问题列表（供提交者自行修改，不自动应用）
     issues: List[ProofreadIssue] = []
+
+
+# ---------------------------------------------------------------------------
+# 文档结构分析（SmartJudge 使用）
+# ---------------------------------------------------------------------------
+
+class ParagraphRole(BaseModel):
+    """单段落的结构分析结果"""
+
+    # 段落序号（0-based，与 Block.paragraph_index 对应）
+    paragraph_index: int
+    # LLM 判定的段落角色
+    role: Literal["h1", "h2", "h3", "body", "caption", "abstract", "keyword",
+                  "reference", "footer", "list_item", "blank"]
+    # 置信度（0.0–1.0）
+    confidence: float = Field(ge=0.0, le=1.0)
+    # 判断依据
+    reason: str = ""
+
+
+class DocumentStructureAnalysis(BaseModel):
+    """文档结构分析结果（用于 SmartJudge 仲裁）"""
+
+    paragraphs: List[ParagraphRole] = []

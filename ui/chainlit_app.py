@@ -17,9 +17,11 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
+import asyncio
+import copy
 import json
 import tempfile
-from typing import List, Set
+from typing import Any, Dict, List, Set
 
 try:
     import chainlit as cl
@@ -51,9 +53,16 @@ _KEY_ISSUES = "pending_issues"
 _KEY_DIFF_ITEMS = "diff_items"
 _KEY_REPORT = "pending_report"
 _KEY_CHAT_HISTORY = "chat_history"
+_KEY_SPEC_OVERRIDES = "spec_overrides"
 
 # Maximum number of chat messages (user+assistant turns) to keep in session context.
 _MAX_CHAT_HISTORY = 20
+
+
+def _deep_merge_dicts(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
+    """深度合并两个配置字典，update 中的叶子值覆盖 base，不整层替换。委托给 core.spec._deep_merge。"""
+    from core.spec import _deep_merge
+    return _deep_merge(base, update)
 
 
 def _make_mode_actions() -> List[cl.Action]:
@@ -73,6 +82,7 @@ async def on_chat_start():
     cl.user_session.set(_KEY_MAX_ITERS, REACT_MAX_ITERS)
     cl.user_session.set(_KEY_STATE, "ready")
     cl.user_session.set(_KEY_CHAT_HISTORY, [])
+    cl.user_session.set(_KEY_SPEC_OVERRIDES, {})
 
     await cl.Message(
         content=(
@@ -146,6 +156,7 @@ async def on_message(message: cl.Message):
         label_mode = cl.user_session.get(_KEY_LABEL_MODE, LLM_MODE)
         use_react = cl.user_session.get(_KEY_USE_REACT, False)
         max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
+        overrides = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
 
         with open(docx_file.path, "rb") as fp:
             input_bytes = fp.read()
@@ -153,7 +164,8 @@ async def on_message(message: cl.Message):
         cl.user_session.set(_KEY_INPUT_BYTES, input_bytes)
         cl.user_session.set(_KEY_FILENAME, docx_file.name)
 
-        await _process_file(input_bytes, docx_file.name, label_mode, use_react, max_iters)
+        await _process_file(input_bytes, docx_file.name, label_mode, use_react, max_iters,
+                            overrides=overrides if overrides else None)
         return
 
     # ── General chat fallback ────────────────────────────────────────────────
@@ -174,26 +186,36 @@ async def _process_file(
     label_mode: str,
     use_react: bool,
     max_iters: int,
+    overrides: dict = None,
 ) -> None:
     """Run the formatting pipeline and display results."""
 
     mode_display = "react" if use_react else label_mode
-    await cl.Message(content=f"⏳ 正在处理文档（模式: **{mode_display}**）…").send()
+    # 显示带旋转沙漏的"正在处理"提示（Task 1 fix）
+    processing_msg = cl.Message(content=f"⏳ 正在处理文档（模式: **{mode_display}**）… ⌛")
+    await processing_msg.send()
 
     try:
         if use_react:
             out_bytes, report = await _run_react_with_steps(
-                input_bytes, filename, max_iters
+                input_bytes, filename, max_iters, overrides=overrides
             )
         else:
-            out_bytes, report = format_docx_bytes(
+            out_bytes, report = await asyncio.to_thread(
+                format_docx_bytes,
                 input_bytes,
                 filename_hint=filename,
                 label_mode=label_mode,
+                overrides=overrides,
             )
     except Exception as e:
-        await cl.Message(content=f"❌ 处理失败：{e}").send()
+        processing_msg.content = f"❌ 处理失败：{e}"
+        await processing_msg.update()
         return
+
+    # 更新提示为"处理完成"
+    processing_msg.content = f"✅ 处理完成（模式: **{mode_display}**）"
+    await processing_msg.update()
 
     # ── Store formatted doc (structural changes only, no text replacements yet)
     cl.user_session.set(_KEY_OUTPUT_BYTES, out_bytes)
@@ -232,6 +254,7 @@ async def _run_react_with_steps(
     input_bytes: bytes,
     filename: str,
     max_iters: int,
+    overrides: dict = None,
 ) -> tuple:
     """Run the ReAct agent and display each iteration as cl.Steps."""
     tmp_in = tmp_out = None
@@ -246,8 +269,10 @@ async def _run_react_with_steps(
 
         async with cl.Step(name="ReAct 初始化", type="tool") as step:
             step.input = f"文件: {filename}，最大迭代: {max_iters}"
-            result_state = run_react_agent(
-                tmp_in, tmp_out, label_mode="rule", max_iters=max_iters
+            result_state = await asyncio.to_thread(
+                run_react_agent,
+                tmp_in, tmp_out, label_mode="rule", max_iters=max_iters,
+                overrides=overrides,
             )
             step.output = f"共 {result_state.get('current_iter', 0)} 轮迭代完成"
 
@@ -280,8 +305,10 @@ async def _run_react_with_steps(
         await cl.Message(
             content=f"⚠️ ReAct 模式失败，已回退到 rule 模式: {e}"
         ).send()
-        out_bytes, report = format_docx_bytes(
-            input_bytes, filename_hint=filename, label_mode="rule"
+        out_bytes, report = await asyncio.to_thread(
+            format_docx_bytes,
+            input_bytes, filename_hint=filename, label_mode="rule",
+            overrides=overrides,
         )
         return out_bytes, report
 
@@ -306,7 +333,13 @@ async def _show_diff_cards(diff_items: List[DiffItem]) -> None:
 # ── General chat ────────────────────────────────────────────────────────────
 
 async def _handle_chat(text: str) -> None:
-    """Forward user message to the LLM for a general chat response (streamed)."""
+    """Forward user message to the LLM for a general chat response (streamed).
+
+    如果用户的消息包含排版意图（如修改颜色），则：
+    1. 解析意图为 overrides 字典
+    2. 与当前 session overrides 进行深度合并
+    3. 若已有上传文件，立即重新处理（"即说即改"）
+    """
     if not LLM_API_KEY:
         await cl.Message(
             content=(
@@ -317,6 +350,42 @@ async def _handle_chat(text: str) -> None:
         ).send()
         return
 
+    # ── 1. 检测排版意图 ────────────────────────────────────────────────────
+    try:
+        from agent.intent_parser import parse_formatting_intent
+        formatting_intent = await parse_formatting_intent(text)
+    except Exception:
+        formatting_intent = None
+
+    if formatting_intent:
+        # 深度合并到 session overrides（保留历史指令）
+        current_overrides: Dict[str, Any] = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
+        new_overrides = _deep_merge_dicts(copy.deepcopy(current_overrides), formatting_intent)
+        cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
+
+        await cl.Message(
+            content=f"🎨 已识别排版指令：`{json.dumps(formatting_intent, ensure_ascii=False)}`\n"
+                    f"当前累积配置：`{json.dumps(new_overrides, ensure_ascii=False)}`"
+        ).send()
+
+        # ── 2. 若已有文件，立即重新处理 ──────────────────────────────────
+        input_bytes: bytes = cl.user_session.get(_KEY_INPUT_BYTES)
+        if input_bytes:
+            filename: str = cl.user_session.get(_KEY_FILENAME, "document.docx")
+            label_mode = cl.user_session.get(_KEY_LABEL_MODE, LLM_MODE)
+            use_react = cl.user_session.get(_KEY_USE_REACT, False)
+            max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
+            await _process_file(
+                input_bytes, filename, label_mode, use_react, max_iters,
+                overrides=new_overrides if new_overrides else None,
+            )
+        else:
+            await cl.Message(
+                content="💡 请上传 `.docx` 文件，我会立即应用上述排版设置。"
+            ).send()
+        return
+
+    # ── 3. 普通对话（流式输出） ──────────────────────────────────────────
     import openai as _openai
 
     history: List[dict] = cl.user_session.get(_KEY_CHAT_HISTORY, [])

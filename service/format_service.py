@@ -78,6 +78,7 @@ def format_docx_file(
     write_report: bool = True,
     *,
     label_mode: str = LLM_MODE,
+    overrides: dict = None,
 ) -> FormatResult:
     """
     文件路径版：适合 CLI 或服务端落盘场景。
@@ -96,7 +97,7 @@ def format_docx_file(
     if report_path is None and write_report:
         report_path = default_report_path(output_path)
 
-    spec = load_spec(spec_path)
+    spec = load_spec(spec_path, overrides=overrides)
 
     doc, blocks = parse_with_fallback(input_path, use_docling=ENABLE_DOCLING)
     labels = _resolve_labels(blocks, doc, label_mode=label_mode)
@@ -131,6 +132,7 @@ def format_docx_bytes(
     filename_hint: str = "input.docx",
     keep_temp_files: bool = False,
     label_mode: str = LLM_MODE,
+    overrides: dict = None,
 ) -> Tuple[bytes, Dict[str, Any]]:
     """
     bytes 版：适合 UI/API（上传文件）场景。
@@ -162,6 +164,7 @@ def format_docx_bytes(
             report_path=report_path,
             write_report=True,
             label_mode=label_mode,
+            overrides=overrides,
         )
 
         with open(res.output_path, "rb") as f:

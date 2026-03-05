@@ -69,7 +69,7 @@ def validate_node(state: GraphState) -> dict:
     doc = state["doc"]
     blocks = state["blocks"]
     labels = state["labels"]
-    spec = load_spec(state["spec_path"])
+    spec = load_spec(state["spec_path"], overrides=state.get("overrides"))
 
     errors: list = []
     passed = True

@@ -1,6 +1,6 @@
 # core/spec.py
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -16,6 +16,20 @@ def _ensure_dict(value: Any, key: str) -> Dict[str, Any]:
     return value
 
 
+def _deep_merge(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    递归深度合并两个配置字典。update 中的值覆盖 base 中对应键的值；
+    若两者均为 dict，则递归合并而非直接替换。
+    """
+    result = dict(base)
+    for k, v in update.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
 def _validate_and_fill_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
     cfg = dict(data)
 
@@ -27,6 +41,7 @@ def _validate_and_fill_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
     for key in ["font_size_pt", "line_spacing", "space_before_pt", "space_after_pt", "first_line_chars"]:
         if key not in body:
             raise ValueError(f"spec.body.{key} is required")
+    body.setdefault("color", None)
 
     heading = _ensure_dict(cfg.get("heading"), "heading")
     for h in ["h1", "h2", "h3"]:
@@ -35,6 +50,7 @@ def _validate_and_fill_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
             if key not in hc:
                 raise ValueError(f"spec.heading.{h}.{key} is required")
         hc.setdefault("alignment", "center" if h == "h1" else "left")
+        hc.setdefault("color", None)
         heading[h] = hc
     cfg["heading"] = heading
 
@@ -116,7 +132,7 @@ def _validate_and_fill_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
-def load_spec(path: str) -> Spec:
+def load_spec(path: str, overrides: Optional[Dict[str, Any]] = None) -> Spec:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
@@ -126,4 +142,7 @@ def load_spec(path: str) -> Spec:
     if not isinstance(data, dict):
         raise ValueError("spec file must be a YAML mapping at top-level")
 
-    return Spec(raw=_validate_and_fill_defaults(data))
+    validated = _validate_and_fill_defaults(data)
+    if overrides:
+        validated = _deep_merge(validated, overrides)
+    return Spec(raw=validated)

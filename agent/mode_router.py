@@ -146,19 +146,22 @@ class ModeRouter:
 
     def _hybrid(self, doc, blocks, rule_labels: Dict) -> Dict:
         """
-        混合模式：规则负责全部排版，仅当触发条件命中时 LLM 对触发段落做校对。
+        混合模式：规则负责全部排版，仅当触发条件命中时 LLM 对触发段落做结构分析与校对。
 
         执行流程：
-        1. 使用规则标签作为排版基准（不依赖 LLM 的结构判断）
+        1. 使用规则标签作为排版基准
         2. 评估触发条件（unknown/标题歧义/潜在列表）
-        3. 仅在触发时调用 LLM，仅校对触发段落（≤20% 高价值任务）
-        4. 校对结果写入 _llm_proofread，供提交者自行修改，不自动应用
-        5. 在 _hybrid_triggers 中记录触发原因与指标
+        3. 仅在触发时调用 LLM：
+           a. 结构分析（call_structure_analysis）→ SmartJudge 仲裁，优化标签
+           b. 校对（call_proofread）→ 提供给提交者自行修改的建议
+        4. 在 _hybrid_triggers 中记录触发原因与指标
         """
+        from core.judge import SmartJudge
+
         # 步骤 1: 计算触发条件
         trigger_info = _compute_hybrid_triggers(blocks, rule_labels)
 
-        # 排版标签完全来自规则
+        # 排版标签先完全来自规则
         result: Dict = {}
         for b in blocks:
             result[b.block_id] = rule_labels.get(b.block_id, "body")
@@ -177,15 +180,53 @@ class ModeRouter:
             result["_hybrid_triggers"]["llm_called"] = False
             return result
 
-        # 步骤 2: 调用 LLM 对触发段落做校对
+        # 步骤 2: 提取段落文本
         all_paragraphs = self._extract_paragraphs(doc)
+        triggered_indices = sorted(trigger_info["triggered_indices"])
+
+        # 步骤 3a: 结构分析 + SmartJudge 仲裁
+        smart_judge = SmartJudge()
+        try:
+            structure_analysis = self.analyzer.client.call_structure_analysis(
+                paragraphs=all_paragraphs,
+                paragraph_indices=triggered_indices,
+            )
+            # 建立 paragraph_index → LLM结果 的快速查找表
+            llm_by_index: Dict[int, dict] = {
+                pr.paragraph_index: {"role": pr.role, "confidence": pr.confidence}
+                for pr in structure_analysis.paragraphs
+            }
+            # 对触发段落进行仲裁：找到对应 block
+            index_to_block = {b.paragraph_index: b for b in blocks}
+            for pidx in triggered_indices:
+                b = index_to_block.get(pidx)
+                if b is None:
+                    continue
+                rule_role = rule_labels.get(b.block_id, "body")
+                llm_dict = llm_by_index.get(pidx, {})
+                if llm_dict:
+                    final_role = smart_judge.arbitrate(
+                        text=b.text or "",
+                        rule_role=rule_role,
+                        llm_response_dict=llm_dict,
+                    )
+                    result[b.block_id] = final_role
+
+            result["_hybrid_triggers"]["structure_analysis_applied"] = True
+        except LLMCallError as e:
+            result.setdefault("_warnings", [])
+            result["_warnings"].append(
+                f"hybrid 模式结构分析失败，已保留规则结果: {e}"
+            )
+            result["_hybrid_triggers"]["structure_analysis_applied"] = False
+
+        # 步骤 3b: 校对（不影响标签）
         try:
             proofread: DocumentProofread = self.analyzer.client.call_proofread(
                 paragraphs=all_paragraphs,
-                paragraph_indices=sorted(trigger_info["triggered_indices"]),
+                paragraph_indices=triggered_indices,
             )
         except LLMCallError as e:
-            # LLM 已尝试调用但失败，保留规则结果并记录警告
             result.setdefault("_warnings", [])
             result["_warnings"].append(
                 f"hybrid 模式 LLM 校对失败，已保留规则结果: {e}"
@@ -196,7 +237,7 @@ class ModeRouter:
 
         result["_hybrid_triggers"]["llm_called"] = True
 
-        # 步骤 3: 记录校对结果（供提交者自行修改）
+        # 步骤 4: 记录校对结果（供提交者自行修改）
         result["_llm_proofread"] = {
             "issues": [issue.model_dump() for issue in proofread.issues],
         }

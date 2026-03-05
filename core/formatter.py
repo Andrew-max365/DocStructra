@@ -3,7 +3,7 @@ import re
 from typing import Dict, List, Set
 from collections import Counter
 
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_LINE_SPACING
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
@@ -247,13 +247,21 @@ def _resolve_alignment(name: str):
     return mapping.get((name or "").strip().lower())
 
 
-def _apply_runs_font(p, zh_font: str, en_font: str, size_pt: float, force_bold=None):
+def _apply_runs_font(p, zh_font: str, en_font: str, size_pt: float, force_bold=None, color_hex=None):
     # 先把中英混合 run 拆开，再逐 run 写入完整字体映射（含超链接内 run）
     normalize_mixed_runs(p)
+    clean_hex = None
+    if color_hex:
+        clean_hex = str(color_hex).lstrip("#").upper()
     for run in iter_paragraph_runs(p):
         run.font.size = Pt(size_pt)
         if force_bold is not None:
             run.font.bold = bool(force_bold)
+        if clean_hex:
+            try:
+                run.font.color.rgb = RGBColor.from_string(clean_hex)
+            except Exception:
+                pass
         set_run_fonts(run, zh_font=zh_font, en_font=en_font)
 
 
@@ -684,7 +692,8 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
 
             if body_alignment is not None:
                 p.paragraph_format.alignment = body_alignment
-            _apply_runs_font(p, zh_font, en_font, size_pt=body_size, force_bold=None)
+            _apply_runs_font(p, zh_font, en_font, size_pt=body_size, force_bold=None,
+                             color_hex=body_cfg.get("color"))
 
         elif role in ("h1", "h2", "h3"):
             hc = heading_cfg[role]
@@ -700,7 +709,8 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
             p.paragraph_format.first_line_indent = Pt(0)
             if heading_align is not None:
                 p.paragraph_format.alignment = heading_align
-            _apply_runs_font(p, zh_font, en_font, size_pt=size, force_bold=bold)
+            _apply_runs_font(p, zh_font, en_font, size_pt=size, force_bold=bold,
+                             color_hex=hc.get("color"))
             formatted_counter[role] += 1
 
         elif role == "caption":

@@ -21,8 +21,9 @@ from config import (
 )
 from agent.prompt_templates import (
     PROOFREAD_SYSTEM_PROMPT, build_proofread_prompt,
+    STRUCTURE_SYSTEM_PROMPT,
 )
-from agent.schema import DocumentProofread, ProofreadIssue
+from agent.schema import DocumentProofread, ProofreadIssue, DocumentStructureAnalysis, ParagraphRole
 
 
 def compute_dynamic_timeout(n_paragraphs: int) -> int:
@@ -198,3 +199,66 @@ class LLMClient:
                 lines = lines[:-1]
             text = "\n".join(lines).strip()
         return text
+
+    def call_structure_analysis(
+        self,
+        paragraphs: List[str],
+        paragraph_indices: Optional[List[int]] = None,
+    ) -> "DocumentStructureAnalysis":
+        """
+        调用大模型对指定段落进行结构分析，返回 DocumentStructureAnalysis。
+
+        :param paragraphs: 全部段落文本列表
+        :param paragraph_indices: 仅分析这些序号的段落；None 表示分析全量
+        :return: DocumentStructureAnalysis 实例
+        :raises LLMCallError: 调用失败或解析失败时抛出
+        """
+        indices = paragraph_indices if paragraph_indices is not None else list(range(len(paragraphs)))
+        n = len(indices)
+        lines = "\n".join(
+            f"  序号{i}: \"{paragraphs[i][:200]}{'...' if len(paragraphs[i]) > 200 else ''}\""
+            for i in indices if i < len(paragraphs)
+        )
+        user_prompt = (
+            f"请对以下 {n} 个段落进行结构分析：\n\n"
+            f"{lines}\n\n"
+            "请输出符合 Schema 的 JSON。"
+        )
+        messages = [
+            {"role": "system", "content": STRUCTURE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        try:
+            raw = self._execute_chat_completion(messages, timeout=compute_dynamic_timeout(n))
+            data = json.loads(self._normalize_json_text(raw))
+            if not isinstance(data, dict):
+                raise LLMCallError("结构分析响应非 JSON 对象", error_type="format_error")
+            paragraphs_data = data.get("paragraphs", [])
+            if not isinstance(paragraphs_data, list):
+                paragraphs_data = []
+            roles = []
+            valid_roles = {"h1", "h2", "h3", "body", "caption", "abstract", "keyword",
+                           "reference", "footer", "list_item", "blank"}
+            for item in paragraphs_data:
+                if not isinstance(item, dict):
+                    continue
+                role_val = item.get("role", "body")
+                if role_val not in valid_roles:
+                    role_val = "body"
+                confidence = float(item.get("confidence", 0.5))
+                confidence = max(0.0, min(1.0, confidence))
+                roles.append(ParagraphRole(
+                    paragraph_index=int(item.get("paragraph_index", 0)),
+                    role=role_val,
+                    confidence=confidence,
+                    reason=str(item.get("reason", "")),
+                ))
+            return DocumentStructureAnalysis(paragraphs=roles)
+        except LLMCallError:
+            raise
+        except json.JSONDecodeError as e:
+            raise LLMCallError(f"结构分析响应 JSON 解析失败: {e}", error_type="format_error") from e
+        except pydantic.ValidationError as e:
+            raise LLMCallError(f"结构分析响应结构校验失败: {e}", error_type="format_error") from e
+        except Exception as e:
+            raise LLMCallError(f"结构分析调用失败: {e}", error_type="unknown") from e

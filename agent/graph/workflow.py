@@ -27,6 +27,7 @@ def run_react_agent(
     spec_path: str = "specs/default.yaml",
     label_mode: str = "rule",
     max_iters: int = 0,
+    overrides: dict = None,
 ) -> dict:
     from config import REACT_MAX_ITERS
 
@@ -48,6 +49,7 @@ def run_react_agent(
         "blocks": None,
         "labels": None,
         "doc": None,
+        "overrides": overrides,
     }
     result = graph.invoke(initial_state)
     return result
