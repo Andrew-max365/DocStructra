@@ -28,7 +28,6 @@ def main():
             args.input,
             args.output,
             spec_path=args.spec,
-            label_mode="rule",
             max_iters=REACT_MAX_ITERS,
         )
         report = result_state.get("report", {})

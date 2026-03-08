@@ -79,6 +79,7 @@ def format_docx_file(
     *,
     label_mode: str = LLM_MODE,
     overrides: dict = None,
+    visual_review: bool = False,
 ) -> FormatResult:
     """
     文件路径版：适合 CLI 或服务端落盘场景。
@@ -88,7 +89,8 @@ def format_docx_file(
     - spec_path: YAML 规范文件
     - report_path: 诊断报告路径；None 则默认与 output 同名 .report.json
     - write_report: 是否写 report.json 到磁盘
-    - label_mode: rule / llm / hybrid
+    - label_mode: hybrid / react
+    - visual_review: 是否开启多模态视觉审查（Phase 3）
 
     返回：FormatResult(output_path, report_path, report_dict)
     """
@@ -99,6 +101,42 @@ def format_docx_file(
 
     spec = load_spec(spec_path, overrides=overrides)
 
+    if label_mode.strip().lower() == "react":
+        # 如果是 React 模式，直接走 Agent Workflow
+        from agent.graph.workflow import run_react_agent
+        from config import VISUAL_REVIEW_ENABLED
+        
+        # 决定是否启用视觉审查（参数或环境变量）
+        use_vr = visual_review or VISUAL_REVIEW_ENABLED
+        
+        res = run_react_agent(
+            input_path=input_path,
+            output_path=output_path,
+            spec_path=spec_path,
+            overrides=overrides,
+            visual_review_enabled=use_vr,
+        )
+            
+        report = res.get("report", {})
+        
+        # 从 graph state 中获取 visual review 数据（若有）
+        if res.get("visual_review_result"):
+            report["visual_review"] = res["visual_review_result"]
+            
+        # 兼容处理
+        for w in res.get("errors", []):
+            report.setdefault("warnings", [])
+            report["warnings"].append(w)
+            
+        if write_report and report_path:
+            os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, ensure_ascii=False, indent=2)
+
+        return FormatResult(output_path=output_path, report_path=report_path, report=report)
+
+
+    # 以下为非 React（ rule / hybrid ) 模式的处理逻辑
     doc, blocks = parse_with_fallback(input_path, use_docling=ENABLE_DOCLING)
     labels = _resolve_labels(blocks, doc, label_mode=label_mode)
 
@@ -113,8 +151,18 @@ def format_docx_file(
         report["llm_proofread"] = labels["_llm_proofread"]
     if "_hybrid_triggers" in labels:
         report["hybrid_triggers"] = labels["_hybrid_triggers"]
-
+        
     save_docx(doc, output_path)
+    
+    # 针对非 React 模式，可以在最后追加一次 Visual Review （可选）
+    if visual_review:
+        try:
+            from agent.visual_reviewer import visual_review as vr_run
+            vr_res = vr_run(output_path)
+            report["visual_review"] = vr_res.model_dump()
+        except Exception as e:
+            report.setdefault("warnings", [])
+            report["warnings"].append(f"视觉审查失败: {e}")
 
     if write_report and report_path:
         os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
@@ -122,7 +170,6 @@ def format_docx_file(
             json.dump(report, f, ensure_ascii=False, indent=2)
 
     return FormatResult(output_path=output_path, report_path=report_path, report=report)
-
 
 
 def format_docx_bytes(
@@ -133,6 +180,7 @@ def format_docx_bytes(
     keep_temp_files: bool = False,
     label_mode: str = LLM_MODE,
     overrides: dict = None,
+    visual_review: bool = False,
 ) -> Tuple[bytes, Dict[str, Any]]:
     """
     bytes 版：适合 UI/API（上传文件）场景。
@@ -140,7 +188,8 @@ def format_docx_bytes(
 
     - filename_hint: 仅用于生成更可读的临时文件名
     - keep_temp_files: 调试用；True 则不删除临时目录
-    - label_mode: rule / llm / hybrid
+    - label_mode: hybrid / react
+    - visual_review: 是否开启多模态视觉审查（Phase 3）
     """
     tmpdir_obj = tempfile.TemporaryDirectory(prefix="docx_agent_")
     tmpdir = tmpdir_obj.name
@@ -165,6 +214,7 @@ def format_docx_bytes(
             write_report=True,
             label_mode=label_mode,
             overrides=overrides,
+            visual_review=visual_review,
         )
 
         with open(res.output_path, "rb") as f:

@@ -74,6 +74,8 @@ def build_summary(report: Dict[str, Any]) -> str:
     cov = _safe_get(report, "labels", "coverage", "coverage_rate", default=None)
     mismatch = _safe_get(report, "labels", "consistency", "mismatched", default=None)
 
+    vr_score = _safe_get(report, "visual_review", "overall_score", default=None)
+
     warnings = report.get("warnings") or []
     warn_n = len(warnings)
 
@@ -85,6 +87,8 @@ def build_summary(report: Dict[str, Any]) -> str:
         parts.append(f"标签覆盖率：{cov:.0%}")
     if mismatch is not None:
         parts.append(f"标签一致性冲突：{mismatch} 条")
+    if vr_score is not None:
+        parts.append(f"视觉审查评分：{vr_score:.1f}")
     if warn_n:
         parts.append(f"告警：{warn_n} 条")
 
@@ -99,6 +103,7 @@ def run_doc_agent_file(
     report_path: Optional[str] = None,
     write_report: bool = True,
     label_mode: str = LLM_MODE,
+    visual_review: bool = False,
 ) -> AgentResult:
     """
     路径模式：适合 CLI/本地批处理/服务器落盘。
@@ -117,6 +122,7 @@ def run_doc_agent_file(
         report_path=report_path,
         write_report=write_report,
         label_mode=label_mode,
+        visual_review=visual_review,
     )
 
     summary = build_summary(res.report)
@@ -141,6 +147,7 @@ def run_doc_agent_bytes(
     spec_path: str = "specs/default.yaml",
     filename_hint: str = "input.docx",
     label_mode: str = LLM_MODE,
+    visual_review: bool = False,
 ) -> Tuple[bytes, AgentResult]:
     """
     bytes 模式：适合 UI/API（上传文件）场景。
@@ -159,6 +166,7 @@ def run_doc_agent_bytes(
         filename_hint=filename_hint,
         keep_temp_files=False,
         label_mode=label_mode,
+        visual_review=visual_review,
     )
     summary = build_summary(report)
 
@@ -202,6 +210,7 @@ def main():
     parser.add_argument("--agent-json", default=None, help="额外输出 agent_result 的 json（便于调试/展示）")
     parser.add_argument("--label-mode", default=LLM_MODE, choices=["hybrid", "react"],
                         help="标签模式：hybrid(规则+LLM校对) / react(Agent迭代)")
+    parser.add_argument("--visual-review", action="store_true", help="启用多模态视觉审查（Phase 3）")
 
     args = parser.parse_args()
 
@@ -215,6 +224,7 @@ def main():
         report_path=args.report,
         write_report=not args.no_report,
         label_mode=args.label_mode,
+        visual_review=args.visual_review,
     )
 
     # 保留你喜欢的输出风格 + 增加 Agent 摘要

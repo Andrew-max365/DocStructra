@@ -208,7 +208,7 @@ class TestFallbackBehavior:
 
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                labels = _resolve_labels(blocks, mock_doc, label_mode="llm")
+                labels = _resolve_labels(blocks, mock_doc, label_mode="hybrid")
 
         assert labels[0] == "body"
         assert labels[1] == "h1"
@@ -255,23 +255,8 @@ class TestFallbackBehavior:
 
             with warnings.catch_warnings(record=True):
                 warnings.simplefilter("always")
-                labels = _resolve_labels(blocks, mock_doc, label_mode="llm")
+                labels = _resolve_labels(blocks, mock_doc, label_mode="hybrid")
 
         assert any("connect_error" in w for w in labels.get("_warnings", []))
 
-    def test_rule_mode_never_calls_llm(self):
-        """rule 模式不应尝试调用 LLM，不产生回退警告。"""
-        from service.format_service import _resolve_labels
 
-        blocks = self._make_blocks()
-        mock_doc = MagicMock()
-
-        with patch("service.format_service.rule_based_labels") as mock_rule:
-            mock_rule.return_value = {0: "body", "_source": "rule_based"}
-
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
-                labels = _resolve_labels(blocks, mock_doc, label_mode="rule")
-
-        assert labels["_source"] == "rule_based"
-        assert len(w) == 0

@@ -477,14 +477,58 @@ def build_intent_prompt() -> str:
     return f"""你是一个专业的 Word 文档排版解析器，主要对现有文档进行格式美化。
 你的唯一任务是：提取用户的排版要求，并严格转化为指定的 JSON 格式。
 
-【JSON 格式要求】（绝对不能改变此结构）
+【JSON 格式要求】（绝对不能改变此结构，只输出用户提到的字段，未提到的不要输出）
 {{
-  "body": {{"font_size_pt": 浮点数, "line_spacing": 浮点数, "color": "十六进制", "font_name": "字体名称"}},
+  "fonts": {{
+    "zh": "中文字体名称（如宋体、黑体、仿宋_GB2312）",
+    "en": "英文字体名称（如Times New Roman、Arial）"
+  }},
+  "body": {{
+    "font_size_pt": 浮点数,
+    "font_name": "字体名称（会同时设置中英文字体）",
+    "line_spacing": 浮点数,
+    "space_before_pt": 浮点数,
+    "space_after_pt": 浮点数,
+    "first_line_chars": 整数（首行缩进字符数，如2表示缩进两个字符）,
+    "color": "十六进制颜色（如FF0000）",
+    "bold": 布尔值,
+    "italic": 布尔值
+  }},
+  "paragraph": {{
+    "alignment": "justify/left/center/right"
+  }},
   "heading": {{
-    "h1": {{"font_size_pt": 浮点数, "color": "十六进制", "align": "center/left/right", "font_name": "字体名称"}},
-    "h2": {{...}}
+    "h1": {{
+      "font_size_pt": 浮点数,
+      "font_name": "字体名称",
+      "line_spacing": 浮点数,
+      "space_before_pt": 浮点数,
+      "space_after_pt": 浮点数,
+      "color": "十六进制颜色",
+      "alignment": "center/left/right",
+      "bold": 布尔值,
+      "italic": 布尔值
+    }},
+    "h2": {{...}},
+    "h3": {{...}}
   }}
 }}
+
+【字段说明】
+1. fonts: 全局字体设置。如果用户说"中文用黑体，英文用Arial"，就设置 fonts.zh 和 fonts.en
+2. body.font_name / heading.h1.font_name: 单独为某个角色设置字体（优先级高于全局 fonts）
+3. line_spacing: 值 < 5.0 表示**倍数行距**（1.5 = 1.5倍）；值 ≥ 5.0 表示**固定值行距**（20 = 固定20磅）
+4. space_before_pt / space_after_pt: 段前/段后距，单位磅(pt)
+5. first_line_chars: 首行缩进字符数（如"首行缩进2字符" → 2，"取消首行缩进" → 0）
+6. paragraph.alignment: 正文段落的全局对齐方式（justify=两端对齐, left=左对齐）
+7. heading.h1.alignment: 标题的对齐方式（注意：旧字段名 align 也可以，但推荐用 alignment）
+8. bold / italic: 加粗/斜体
+
+【注意事项】
+- 用户说"字体改为宋体"但未指定中英文时，设为 body.font_name
+- 用户说"标题用黑体"时，设为 heading.h1.font_name（以及 h2、h3 如果用户没区分）
+- 用户说"中文用宋体，英文用 Times New Roman"时，设为 fonts.zh 和 fonts.en
+- 如果用户没有提到某个字段，就不要输出该字段！
 
 【基础排版常识库】
 {load_knowledge_base()}

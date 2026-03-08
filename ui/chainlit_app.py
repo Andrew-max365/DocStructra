@@ -39,11 +39,7 @@ from ui.diff_utils import (
     DiffItem,
 )
 
-LABEL_MODES = ["hybrid", "react"]
-
 # Session state keys
-_KEY_LABEL_MODE = "label_mode"
-_KEY_USE_REACT = "use_react"
 _KEY_MAX_ITERS = "max_iters"
 _KEY_STATE = "ui_state"        # "ready" | "awaiting_feedback"
 _KEY_INPUT_BYTES = "input_bytes"
@@ -65,20 +61,8 @@ def _deep_merge_dicts(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str,
     return _deep_merge(base, update)
 
 
-def _make_mode_actions() -> List[cl.Action]:
-    """Return the two mode-selection action buttons."""
-    return [
-        cl.Action(name="mode_hybrid", payload={"mode": "hybrid"}, label="⚡ Hybrid（推荐）",
-                  tooltip="规则 + LLM 混合，兼顾速度与质量"),
-        cl.Action(name="mode_react",  payload={"mode": "react"},  label="🔁 ReAct 模式",
-                  tooltip="多轮迭代，适合复杂文档"),
-    ]
-
-
 @cl.on_chat_start
 async def on_chat_start():
-    cl.user_session.set(_KEY_LABEL_MODE, LLM_MODE)
-    cl.user_session.set(_KEY_USE_REACT, False)
     cl.user_session.set(_KEY_MAX_ITERS, REACT_MAX_ITERS)
     cl.user_session.set(_KEY_STATE, "ready")
     cl.user_session.set(_KEY_CHAT_HISTORY, [])
@@ -86,11 +70,10 @@ async def on_chat_start():
 
     await cl.Message(
         content=(
-            "👋 欢迎使用 **Sturctra 文档排版智能体**！\n\n"
-            f"当前模式：**{LLM_MODE}**。点击下方按钮切换模式，然后直接上传 `.docx` 文件即可开始排版。\n\n"
+            "👋 欢迎使用 **Sturctra 智能文档排版助手**！\n\n"
+            "直接上传 `.docx` 文件即可开始全自动排版（极速规则 + 大模型智能纠错）。\n\n"
             "💬 也可以直接发送消息与我对话。"
-        ),
-        actions=_make_mode_actions(),
+        )
     ).send()
 
 """   #引入 Slash 命令（/f 或 /format） 来实现物理隔离
@@ -117,46 +100,12 @@ async def on_chat_start():
 
 
 
-
-# ── Mode action callbacks ────────────────────────────────────────────────────
-
-async def _set_mode(value: str, action: cl.Action) -> None:
-    if value == "react":
-        cl.user_session.set(_KEY_LABEL_MODE, "rule")
-        cl.user_session.set(_KEY_USE_REACT, True)
-    else:
-        cl.user_session.set(_KEY_LABEL_MODE, value)
-        cl.user_session.set(_KEY_USE_REACT, False)
-    await cl.Message(
-        content=f"✅ 已切换到 **{value}** 模式。请直接上传 `.docx` 文件开始排版。",
-        actions=_make_mode_actions(),
-    ).send()
-    await action.remove()
-
-
-@cl.action_callback("mode_hybrid")
-async def on_mode_hybrid(action: cl.Action):
-    await _set_mode(action.payload.get("mode", "hybrid"), action)
-
-
-@cl.action_callback("mode_react")
-async def on_mode_react(action: cl.Action):
-    await _set_mode(action.payload.get("mode", "react"), action)
-
-# @cl.action_callback("diff_action")    #当用户点击了 '全部接受' 或 '全部拒绝' 按钮
-# async def on_diff_action(action: cl.Action):
-#     await action.remove()  # 点完就让按钮消失，防止重复点击
-#     intent = action.value  # "accept_all" 或 "reject_all"
-#     await _execute_feedback(intent, [])
-
 @cl.action_callback("accept_all_action")
 async def on_accept_all(action: cl.Action):
-    await action.remove()  # 点完就让按钮消失
     await _execute_feedback("accept_all", [])
 
 @cl.action_callback("reject_all_action")
 async def on_reject_all(action: cl.Action):
-    await action.remove()  # 点完就让按钮消失
     await _execute_feedback("reject_all", [])
 
 
@@ -177,24 +126,8 @@ async def on_message(message: cl.Message):
 
     text = message.content.strip()
 
-    # ── Mode selection via text (kept for backwards compatibility) ───────────
-    if text.lower() in LABEL_MODES:
-        if text.lower() == "react":
-            cl.user_session.set(_KEY_LABEL_MODE, "rule")
-            cl.user_session.set(_KEY_USE_REACT, True)
-        else:
-            cl.user_session.set(_KEY_LABEL_MODE, text.lower())
-            cl.user_session.set(_KEY_USE_REACT, False)
-        await cl.Message(
-            content=f"✅ 已切换到 **{text.lower()}** 模式，请上传 .docx 文件。",
-            actions=_make_mode_actions(),
-        ).send()
-        return
-
     # ── File upload (text is optional) ──────────────────────────────────────
     if docx_file is not None:
-        label_mode = cl.user_session.get(_KEY_LABEL_MODE, LLM_MODE)
-        use_react = cl.user_session.get(_KEY_USE_REACT, False)
         max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
         overrides = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
 
@@ -204,8 +137,35 @@ async def on_message(message: cl.Message):
         cl.user_session.set(_KEY_INPUT_BYTES, input_bytes)
         cl.user_session.set(_KEY_FILENAME, docx_file.name)
 
-        await _process_file(input_bytes, docx_file.name, label_mode, use_react, max_iters,
-                            overrides=overrides if overrides else None)
+        # ── 新增：若用户在发送文件时附带了文字要求，先解析为 overrides ──
+        if text:
+            thinking_msg = cl.Message(content="⏳ 正在解析您的排版要求...")
+            await thinking_msg.send()
+
+            try:
+                from agent.intent_parser import parse_formatting_intent
+                formatting_intent = await parse_formatting_intent(text)
+            except Exception as e:
+                formatting_intent = None
+                print(f"解析排版意图异常: {e}")
+
+            if formatting_intent:
+                new_overrides = _deep_merge_dicts(copy.deepcopy(overrides), formatting_intent)
+                cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
+                overrides = new_overrides
+
+                pretty = json.dumps(formatting_intent, ensure_ascii=False, indent=2)
+                thinking_msg.content = (
+                    f"✅ **排版指令已确认！**\n\n"
+                    f"```json\n{pretty}\n```\n\n"
+                    f"⏳ 正在处理文档..."
+                )
+                await thinking_msg.update()
+            else:
+                # 没有解析出排版意图 → 可能是普通备注，忽略即可
+                await thinking_msg.remove()
+
+        await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None)
         return
 
     # ── General chat fallback ────────────────────────────────────────────────
@@ -214,81 +174,77 @@ async def on_message(message: cl.Message):
     else:
         await cl.Message(
             content="💡 请上传 `.docx` 文件开始排版，或直接发送消息与我对话。",
-            actions=_make_mode_actions(),
         ).send()
 
 
 # ── Core processing ────────────────────────────────────────────────────────
 
 async def _process_file(
-    input_bytes: bytes,
-    filename: str,
-    label_mode: str,
-    use_react: bool,
-    max_iters: int,
-    overrides: dict = None,
+        input_bytes: bytes,
+        filename: str,
+        max_iters: int,
+        overrides: dict = None,
 ) -> None:
     """Run the formatting pipeline and display results."""
 
-    mode_display = "react" if use_react else label_mode
-    # 显示带旋转沙漏的"正在处理"提示（Task 1 fix）
-    processing_msg = cl.Message(content=f"⏳ 正在处理文档（模式: **{mode_display}**）… ⌛")
+    processing_msg = cl.Message(content=f"🚀 任务已启动：正在全自动处理文档...")
     await processing_msg.send()
 
     try:
-        if use_react:
-            out_bytes, report = await _run_react_with_steps(
-                input_bytes, filename, max_iters, overrides=overrides
-            )
-        else:
-            out_bytes, report = await asyncio.to_thread(
-                format_docx_bytes,
-                input_bytes,
-                filename_hint=filename,
-                label_mode=label_mode,
-                overrides=overrides,
-            )
+        # 🌟 调用流式流程
+        out_bytes, report = await _run_react_with_steps(
+            input_bytes, filename, max_iters, overrides=overrides
+        )
     except Exception as e:
         processing_msg.content = f"❌ 处理失败：{e}"
         await processing_msg.update()
         return
 
-    # 更新提示为"处理完成"
-    processing_msg.content = f"✅ 处理完成（模式: **{mode_display}**）"
-    await processing_msg.update()
+    # 隐藏刚才的过渡消息
+    await processing_msg.remove()
 
-    # ── Store formatted doc (structural changes only, no text replacements yet)
+    # 1. 保存当前状态，防止用户点按钮时找不到数据
     cl.user_session.set(_KEY_OUTPUT_BYTES, out_bytes)
     cl.user_session.set(_KEY_REPORT, report)
+    cl.user_session.set(_KEY_FILENAME, filename)
 
-    # ── Structural diff summary ──────────────────────────────────────────────
-    struct_diff = generate_structural_diff(report)
-    if struct_diff:
-        await cl.Message(
-            content=f"### 📐 格式化变更摘要\n\n{struct_diff}"
-        ).send()
+    try:
+        # 2. 生成排版结构变更摘要
+        from ui.diff_utils import generate_structural_diff, build_diff_items
+        struct_diff = generate_structural_diff(report)
+        if struct_diff:
+            await cl.Message(
+                content=f"### 📐 排版格式化变更摘要\n\n{struct_diff}"
+            ).send()
 
-    # ── LLM proofread diff cards ─────────────────────────────────────────────
-    raw_issues: list = report.get("llm_proofread", {}).get("issues", [])
-    diff_items = build_diff_items(raw_issues)
-    cl.user_session.set(_KEY_ISSUES, raw_issues)
-    cl.user_session.set(_KEY_DIFF_ITEMS, diff_items)
+        # 3. 提取错别字校对建议
+        # ⚠️ 注意：这里必须用 get 的链式调用，防止大模型没返回 proofread 导致报错
+        raw_issues = report.get("llm_proofread", {}).get("issues", [])
+        diff_items = build_diff_items(raw_issues)
 
-    if diff_items:
-        await _show_diff_cards(diff_items)
-        cl.user_session.set(_KEY_STATE, "awaiting_feedback")
+        cl.user_session.set(_KEY_ISSUES, raw_issues)
+        cl.user_session.set(_KEY_DIFF_ITEMS, diff_items)
 
-    else:
+        # 4. 如果有错别字建议，展示卡片让用户选；如果没有，直接给下载链接！
+        if diff_items:
+            await _show_diff_cards(diff_items)
+            cl.user_session.set(_KEY_STATE, "awaiting_feedback")
+        else:
+            # 没有任何错别字，直接出锅！
+            await _provide_download(out_bytes, report, filename, applied=0)
+    except Exception as e:
+        # 后处理出错时，仍然尝试提供下载，不让用户白等
+        await cl.Message(content=f"⚠️ 后处理阶段出现异常：{e}，但文档已成功排版。").send()
         await _provide_download(out_bytes, report, filename, applied=0)
 
 
 async def _run_react_with_steps(
-    input_bytes: bytes,
-    filename: str,
-    max_iters: int,
-    overrides: dict = None,
+        input_bytes: bytes,
+        filename: str,
+        max_iters: int,
+        overrides: dict = None,
 ) -> tuple:
-    """Run the ReAct agent and display each iteration as cl.Steps."""
+    """Run the ReAct agent and display progress dynamically via streaming."""
     tmp_in = tmp_out = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as f:
@@ -297,49 +253,63 @@ async def _run_react_with_steps(
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as f:
             tmp_out = f.name
 
-        from agent.graph.workflow import run_react_agent
+        # 🚀 引入我们刚刚写好的流式生成函数
+        from agent.graph.workflow import run_react_agent_stream
 
-        async with cl.Step(name="ReAct 初始化", type="tool") as step:
-            step.input = f"文件: {filename}，最大迭代: {max_iters}"
-            result_state = await asyncio.to_thread(
-                run_react_agent,
-                tmp_in, tmp_out, label_mode="rule", max_iters=max_iters,
-                overrides=overrides,
-            )
-            step.output = f"共 {result_state.get('current_iter', 0)} 轮迭代完成"
+        result_state = {}
 
-        # Show each iteration
-        thoughts = result_state.get("thoughts", [])
-        observations = result_state.get("observations", [])
-        import itertools
-        _sentinel = object()
-        for idx, (thought, obs) in enumerate(
-            itertools.zip_longest(thoughts, observations, fillvalue=None), start=1
+        # 替代原本阻塞式的 asyncio.to_thread，使用 async for 优雅地“倾听”Agent的进展
+        async for event in run_react_agent_stream(
+                tmp_in, tmp_out, max_iters=max_iters, overrides=overrides
         ):
-            if thought is None:
-                thought = "(无 Thought 记录)"
-            if obs is None:
-                obs = {}
-            async with cl.Step(name=f"迭代 {idx}", type="run") as step:
-                step.input = f"**Thought**: {thought}"
-                passed = obs.get("passed", False)
-                errors = obs.get("errors", [])
-                status = "✅ 通过" if passed else f"❌ 失败 ({len(errors)} 错误)"
-                details = "\n".join(f"  - {e}" for e in errors) if errors else "  无错误"
-                step.output = f"**Observation**: {status}\n{details}"
+            for node_name, state_update in event.items():
+                # 记录最终状态
+                result_state.update(state_update)
 
+                # 🚀 核心：根据不同节点的完成状态，向前端“直播”
+                if node_name == "ingest":
+                    await cl.Message(content="✅ **阶段 1/4**：读取成功，已完成基础规则格式解析。").send()
+                elif node_name == "trigger":
+                    if state_update.get("needs_llm"):
+                        await cl.Message(
+                            content="🔍 **阶段 2/4**：雷达扫描到异常段落！\n"
+                                    "> 正在唤醒大模型进行深度结构分析与错别字校对...\n"
+                                    "*(此过程大约需要 30~60 秒，请您先喝口水 ☕)* ⏳"
+                        ).send()
+                    else:
+                        await cl.Message(
+                            content="⚡ **阶段 2/4**：文档结构极其清晰！\n"
+                                    "> 无需大模型介入，已为您切换至极速排版模式。"
+                        ).send()
+                elif node_name == "reason":
+                    await cl.Message(content="🧠 **阶段 3/4**：大模型结构分析完毕，正在为您应用智能排版策略...").send()
+                elif node_name == "validate":
+                    passed = state_update.get("passed", False)
+                    if passed:
+                        await cl.Message(content="✨ **阶段 4/4**：所有排版格式应用成功！").send()
+                    else:
+                        errors = state_update.get("errors", [])
+                        await cl.Message(content=f"⚠️ **排版异常警告**：\n{errors}").send()
+                elif node_name == "reflect":
+                    await cl.Message(content="👀 **附加阶段**：视觉多模态审查完毕。").send()
+
+        # 读取最终生成的二进制文档
         with open(tmp_out, "rb") as f:
             out_bytes = f.read()
-        report = result_state.get("report", {})
-        return out_bytes, report
+
+        return out_bytes, result_state.get("report", {})
 
     except Exception as e:
+        import traceback
         await cl.Message(
-            content=f"⚠️ ReAct 模式失败，已回退到 rule 模式: {e}"
+            content=f"⚠️ 排版流水线发生崩溃: {e}\n```\n{traceback.format_exc()}\n```"
         ).send()
+
+        # 原有的安全回退机制
+        from service.format_service import format_docx_bytes
         out_bytes, report = await asyncio.to_thread(
             format_docx_bytes,
-            input_bytes, filename_hint=filename, label_mode="rule",
+            input_bytes, filename_hint=filename, label_mode="hybrid",
             overrides=overrides,
         )
         return out_bytes, report
@@ -352,7 +322,6 @@ async def _run_react_with_steps(
                 except OSError:
                     pass
 
-
 async def _show_diff_cards(diff_items: List[DiffItem]) -> None:
     """Display diff items as plain markdown with action buttons at the bottom."""
     lines = [f"### 🔍 LLM 校对建议（共 {len(diff_items)} 条）\n"]
@@ -363,19 +332,27 @@ async def _show_diff_cards(diff_items: List[DiffItem]) -> None:
     lines.append("---\n🤔 **请点击下方按钮快捷操作，或者直接打字告诉我您的决定：**")
 
     # 核心修改：将按钮直接挂载在输出建议的这条消息上！
-    await cl.Message(
+    msg = cl.Message(
         content="\n".join(lines),
         actions=[
-            # 💡 补充 value="accept"，防止前端渲染失败
             cl.Action(name="accept_all_action", payload={"action": "accept"}, label="✅ 全部接受"),
             cl.Action(name="reject_all_action", payload={"action": "reject"}, label="❌ 全部拒绝"),
         ]
-    ).send()
+    )
+    await msg.send()
+    cl.user_session.set("diff_msg", msg)
 
 
 async def _execute_feedback(intent: str, rejected: List[int]) -> None:
     """执行校对反馈操作并输出文档"""
     cl.user_session.set(_KEY_STATE, "ready")  # 恢复状态
+
+    # 移除界面上的按钮（无论是通过点击还是聊天触发该流程，都应令历史按钮消失）
+    msg = cl.user_session.get("diff_msg")
+    if msg:
+        msg.actions = []
+        await msg.update()
+        cl.user_session.set("diff_msg", None)
 
     diff_items = cl.user_session.get(_KEY_DIFF_ITEMS, [])
     raw_issues = cl.user_session.get(_KEY_ISSUES, [])
@@ -525,12 +502,14 @@ async def _handle_chat(text: str) -> None:
     except Exception as e:
         await cl.Message(content=f"💬 对话失败：{e}").send()
 '''
+
+
 async def _handle_chat(text: str) -> None:
     """全自动路由：自动判断是聊天还是排版指令，且提供丝滑加载提示"""
     if not LLM_API_KEY:
         await cl.Message(
-            content="💬 未配置 LLM API Key，暂无法进行对话或解析指令。",
-            actions=_make_mode_actions(),
+            content="💬 未配置 LLM API Key，暂无法进行对话或解析指令。"
+            # 🧹 已删除旧的 actions=_make_mode_actions()
         ).send()
         return
 
@@ -552,6 +531,10 @@ async def _handle_chat(text: str) -> None:
     # ════════════════════════════════════════════════════════════════════════
     if formatting_intent:
         current_overrides: Dict[str, Any] = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
+        from ui.chainlit_app import _deep_merge_dicts
+        import copy
+        import json
+
         new_overrides = _deep_merge_dicts(copy.deepcopy(current_overrides), formatting_intent)
         cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
 
@@ -569,12 +552,11 @@ async def _handle_chat(text: str) -> None:
             await thinking_msg.update()
 
             filename: str = cl.user_session.get(_KEY_FILENAME, "document.docx")
-            label_mode = cl.user_session.get(_KEY_LABEL_MODE, LLM_MODE)
-            use_react = cl.user_session.get(_KEY_USE_REACT, False)
             max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
 
+            # 🧹 核心修复：只传需要的参数，去掉 label_mode 和 use_react
             await _process_file(
-                input_bytes, filename, label_mode, use_react, max_iters,
+                input_bytes, filename, max_iters,
                 overrides=new_overrides,
             )
         else:
@@ -598,6 +580,7 @@ async def _handle_chat(text: str) -> None:
     history.append({"role": "user", "content": text})
 
     try:
+        from config import LLM_BASE_URL, LLM_MODEL
         client = _openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=30.0)
         msg = cl.Message(content="")
         await msg.send()
@@ -609,7 +592,7 @@ async def _handle_chat(text: str) -> None:
                     {
                         "role": "system",
                         "content": (
-                                "你是 MyAgent 文档格式化助手。"
+                                "你是 Structra 文档格式化助手。"
                                 "你可以帮助用户了解文档格式化知识、解答关于本工具的使用问题，也可以进行一般性的中文对话。"
                         ),
                     },

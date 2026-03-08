@@ -1,13 +1,15 @@
 # agent/llm_client.py
 # 封装对大模型 API 的调用（使用 openai SDK）
 from __future__ import annotations
-
+import base64
+from openai import AsyncOpenAI
 import json
 import time
 from typing import Any, List, Optional
 
 import openai
 import pydantic
+
 
 from config import (
     LLM_API_KEY,
@@ -18,6 +20,9 @@ from config import (
     LLM_MAX_TIMEOUT_S,
     LLM_RETRY_ATTEMPTS,
     LLM_RETRY_BACKOFF_S,
+    VISION_API_KEY,
+    VISION_BASE_URL,
+    VISION_MODEL,
 )
 from agent.prompt_templates import (
     PROOFREAD_SYSTEM_PROMPT, build_proofread_prompt,
@@ -262,3 +267,46 @@ class LLMClient:
             raise LLMCallError(f"结构分析响应结构校验失败: {e}", error_type="format_error") from e
         except Exception as e:
             raise LLMCallError(f"结构分析调用失败: {e}", error_type="unknown") from e
+
+    @staticmethod
+    async def call_vision_audit(image_path: str,
+                                prompt: str = "请检查这张文档截图的排版是否符合规范，是否有错别字？") -> str:
+        """
+        专门用于视觉审查的方法，调用具备 Vision 能力的模型
+        """
+        if not VISION_API_KEY:
+            return "跳过视觉审查：未配置 VISION_API_KEY"
+
+        # 1. 将图片转换为 Base64 编码
+        with open(image_path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+
+        # 2. 创建专门的视觉客户端 (注意：这里不用 DeepSeek 的配置)
+        vision_client = AsyncOpenAI(
+            api_key=VISION_API_KEY,
+            base_url=VISION_BASE_URL
+        )
+
+        try:
+            # 3. 发送多模态请求
+            response = await vision_client.chat.completions.create(
+                model=VISION_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{base64_image}"
+                                }
+                            }
+                        ],
+                    }
+                ],
+                max_tokens=800,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"视觉审查调用失败: {str(e)}"

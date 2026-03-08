@@ -29,6 +29,12 @@
 - **楷体_GB2312**：公文二级标题或签发人常用。
 - **Times New Roman**：英文、数字、公式中的变量首选字体。
 
+### 1.3 行距设置规范（核心常识）
+在将用户的行距要求转换为 JSON 参数 `line_spacing` 时，必须严格遵循以下数值转换规则，**绝对不需要去网络搜索**：
+- **倍数行距**：直接提取数字。例如“单倍行距”= `1.0`，“1.5倍行距”= `1.5`，“2倍行距”= `2.0`，“双倍行距”= `2.0`。
+- **固定值行距**：直接提取磅值数字。例如“固定值20磅”= `20.0`，“28磅”= `28.0`。
+- **判断依据**：当 `line_spacing` 的值 < 5.0 时，排版引擎会自动识别为倍数行距；当值 ≥ 5.0 时，会自动识别为固定磅值。
+
 ---
 
 ## 二、中国学位论文通用格式（以北大标准为基准）
@@ -113,11 +119,23 @@
 
 | 用户指令 | 思考逻辑（查阅上方标准） | 最终输出的 JSON 格式 (Strict Nested) |
 | :--- | :--- | :--- |
-| **"按学位论文/毕业论文格式排版"** | 查阅二：正文宋体小四(12pt)+固定行距20磅；一级标题黑体三号(16pt)居中 | `{"body": {"font_name": "宋体", "font_size_pt": 12.0, "line_spacing": 20, "line_spacing_rule": "exact", "first_line_indent": 2}, "heading": {"h1": {"font_name": "黑体", "font_size_pt": 16.0, "align": "center", "bold": true}, "h2": {"font_name": "黑体", "font_size_pt": 14.0, "align": "left", "bold": true}}}` |
-| **"按公文格式/红头文件格式"** | 查阅四：正文仿宋三号(16pt)+固定行距28磅；一级标题黑体三号 | `{"body": {"font_name": "仿宋_GB2312", "font_size_pt": 16.0, "line_spacing": 28, "line_spacing_rule": "exact"}, "heading": {"h1": {"font_name": "黑体", "font_size_pt": 16.0, "align": "center"}, "h2": {"font_name": "楷体_GB2312", "font_size_pt": 16.0}}}` |
-| **"按英文APA格式/英文论文格式"** | 查阅五：正文TNR 12pt+双倍行距；标题加粗居中 | `{"body": {"font_name": "Times New Roman", "font_size_pt": 12.0, "line_spacing": 2.0}, "heading": {"h1": {"font_name": "Times New Roman", "font_size_pt": 12.0, "bold": true, "align": "center"}, "h2": {"font_name": "Times New Roman", "font_size_pt": 12.0, "bold": true, "align": "left"}}}` |
-| **"正文宋体小四，标题黑体三号"** | 直接映射：小四=12.0，三号=16.0 | `{"body": {"font_name": "宋体", "font_size_pt": 12.0}, "heading": {"h1": {"font_name": "黑体", "font_size_pt": 16.0}}}` |
-| **"把标题改成红色，正文1.5倍行距"** | 简单修改 | `{"body": {"line_spacing": 1.5}, "heading": {"h1": {"color": "FF0000"}, "h2": {"color": "FF0000"}}}` |
+| **"按学位论文/毕业论文格式排版"** | 查阅二：正文宋体小四+固定行距20磅+首行缩进2字符 | `{"fonts": {"zh": "宋体", "en": "Times New Roman"}, "body": {"font_size_pt": 12.0, "line_spacing": 20, "first_line_chars": 2}, "paragraph": {"alignment": "justify"}, "heading": {"h1": {"font_name": "黑体", "font_size_pt": 16.0, "alignment": "center", "bold": true, "space_before_pt": 24, "space_after_pt": 18}, "h2": {"font_name": "黑体", "font_size_pt": 14.0, "alignment": "left", "bold": true, "space_before_pt": 24, "space_after_pt": 6}}}` |
+| **"按公文格式/红头文件格式"** | 查阅四：正文仿宋三号+固定行距28磅 | `{"fonts": {"zh": "仿宋_GB2312"}, "body": {"font_size_pt": 16.0, "line_spacing": 28}, "heading": {"h1": {"font_name": "黑体", "font_size_pt": 16.0, "alignment": "center"}, "h2": {"font_name": "楷体_GB2312", "font_size_pt": 16.0}}}` |
+| **"按英文APA格式"** | 查阅五：正文TNR 12pt+双倍行距 | `{"fonts": {"en": "Times New Roman"}, "body": {"font_size_pt": 12.0, "line_spacing": 2.0}, "heading": {"h1": {"font_size_pt": 12.0, "bold": true, "alignment": "center"}, "h2": {"font_size_pt": 12.0, "bold": true, "alignment": "left"}}}` |
+| **"正文宋体小四，标题黑体三号"** | 直接映射 | `{"body": {"font_name": "宋体", "font_size_pt": 12.0}, "heading": {"h1": {"font_name": "黑体", "font_size_pt": 16.0}}}` |
+| **"把标题改成红色，正文1.5倍行距"** | 倍数行距直接填浮点数 | `{"body": {"line_spacing": 1.5}, "heading": {"h1": {"color": "FF0000"}}} `|
+| **"正文改成2倍行距 / 双倍行距"** | 倍数行距直接填浮点数 |` {"body": {"line_spacing": 2.0}} `|
+| **"行间距改为固定值20磅"** | 固定磅值直接填浮点数 | `{"body": {"line_spacing": 20.0}} `|
+| **"段落后10磅"** | 段后距 | `{"body": {"space_after_pt": 10}}` |
+| **"段前6磅段后6磅"** | 段距 | `{"body": {"space_before_pt": 6, "space_after_pt": 6}}` |
+| **"首行缩进2字符"** | 首行缩进 | `{"body": {"first_line_chars": 2}}` |
+| **"取消首行缩进"** | 首行缩进设为0 | `{"body": {"first_line_chars": 0}}` |
+| **"正文两端对齐"** | 对齐方式 | `{"paragraph": {"alignment": "justify"}}` |
+| **"标题居中"** | 标题对齐 | `{"heading": {"h1": {"alignment": "center"}, "h2": {"alignment": "center"}}}` |
+| **"中文用宋体，英文用Times New Roman"** | 分设中英文字体 | `{"fonts": {"zh": "宋体", "en": "Times New Roman"}}` |
+| **"正文改为楷体"** | 单独设置正文字体 | `{"body": {"font_name": "楷体"}}` |
+| **"正文加粗"** | 正文加粗 | `{"body": {"bold": true}}` |
+| **"标题斜体"** | 标题斜体 | `{"heading": {"h1": {"italic": true}, "h2": {"italic": true}}}` |
 
 ---
 

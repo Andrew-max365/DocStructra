@@ -53,3 +53,14 @@ class GraphState(TypedDict):
     labels: Any
     doc: Any
     overrides: Any
+    # --- 新增：雷达触发与校对数据 ---
+    needs_llm: bool
+    triggered_indices: List[int]
+    hybrid_triggers: dict
+    proofread_issues: List[dict]
+    # --- Phase 3: 视觉反思 ---
+    visual_review_result: Optional[dict]     # VisualReviewResult 序列化
+    reflection_count: int                     # 当前反思迭代次数
+    reflection_history: List[dict]            # 反思历史记录
+    visual_review_enabled: bool               # 是否启用视觉审查
+    visual_feedback_for_reason: Optional[str] # 视觉审查反馈摘要（注入 reason_node）

@@ -29,8 +29,8 @@ LLM_RETRY_ATTEMPTS: int = max(1, int(os.getenv("LLM_RETRY_ATTEMPTS", "3")))
 # 重试指数退避基础等待秒数（实际等待 = base * 2^(attempt-1)）
 LLM_RETRY_BACKOFF_S: float = max(0.0, float(os.getenv("LLM_RETRY_BACKOFF_S", "1")))
 
-# 排版模式：rule（纯规则）| llm（纯大模型）| hybrid（混合，推荐）
-LLM_MODE: str = os.getenv("LLM_MODE", "hybrid")  # rule | llm | hybrid
+# 排版模式：hybrid（混合，推荐）| react（Agent 迭代）
+LLM_MODE: str = os.getenv("LLM_MODE", "hybrid")  # hybrid | react
 
 # API 服务端鉴权 Key（为空则不启用认证，适合本地 Demo；生产环境请务必设置）
 SERVER_API_KEY: str = os.getenv("SERVER_API_KEY", "")
@@ -49,3 +49,29 @@ BING_API_KEY = ""
 # Google 搜索配置
 GOOGLE_API_KEY = ""
 GOOGLE_CX = ""  #Google 搜索引擎 ID
+
+# ---------------------------------------------------------------------------
+# Phase 3: 视觉审查 (Visual Review) 配置
+# ---------------------------------------------------------------------------
+
+# 视觉审查总开关（True 时在工作流 Validate 后追加多模态视觉审查）
+VISUAL_REVIEW_ENABLED: bool = os.getenv("VISUAL_REVIEW_ENABLED", "false").strip().lower() == "true"
+
+# 多模态模型名称（必须支持图片输入，如 gpt-4o / qwen-vl-max）
+VISUAL_REVIEW_MODEL: str = os.getenv("VISUAL_REVIEW_MODEL", LLM_MODEL)
+
+# 最大渲染页数（控制 token 消耗与延迟）
+VISUAL_REVIEW_MAX_PAGES: int = max(1, int(os.getenv("VISUAL_REVIEW_MAX_PAGES", "3")))
+
+# LibreOffice soffice 可执行文件路径
+LIBREOFFICE_PATH: str = os.getenv("LIBREOFFICE_PATH", "soffice")
+
+# PNG 渲染分辨率（DPI）
+VISUAL_REVIEW_DPI: int = max(72, int(os.getenv("VISUAL_REVIEW_DPI", "150")))
+
+# 视觉反思最大迭代次数
+REFLECTION_MAX_ITERS: int = max(0, int(os.getenv("REFLECTION_MAX_ITERS", "2")))
+
+VISION_API_KEY: str = os.getenv("VISION_API_KEY", "")
+VISION_BASE_URL: str = os.getenv("VISION_BASE_URL", "https://api.openai.com/v1")
+VISION_MODEL: str = os.getenv("VISION_MODEL", "gpt-4o-mini")

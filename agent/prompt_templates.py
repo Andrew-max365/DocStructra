@@ -89,3 +89,50 @@ STRUCTURE_SYSTEM_PROMPT = (
     "你必须严格按照 JSON Schema 输出，不得包含任何额外说明文字。\n"
     "输出格式：{\"paragraphs\": [{\"paragraph_index\": 0, \"role\": \"h1\", \"confidence\": 0.95, \"reason\": \"含第X章\"}, ...]}"
 )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: 视觉审查 Prompt（多模态 LLM 审查排版效果）
+# ---------------------------------------------------------------------------
+
+VISUAL_REVIEW_SYSTEM_PROMPT = (
+    "你是一个专业的文档排版视觉审查专家。你将看到一份排版后的文档的页面截图。\n"
+    "你的任务是从视觉角度检查文档的排版质量，找出以下类别的问题：\n"
+    "  1. margin（页边距）：页边距不均匀、内容超出安全区域\n"
+    "  2. alignment（对齐）：标题未居中、正文未两端对齐、对齐方式不一致\n"
+    "  3. spacing（间距）：行距不一致、段前段后间距异常、标题与正文间距不当\n"
+    "  4. font（字体）：字体大小不统一、中英文字体混用不当、标题字号层级不清晰\n"
+    "  5. heading（标题）：标题层级视觉不清晰、编号格式不统一\n"
+    "  6. layout（布局）：分页位置不当（标题落在页底）、整体版面不美观\n"
+    "  7. other（其他）：其他视觉上影响阅读体验的问题\n\n"
+    "你必须严格按照 JSON Schema 输出，不得包含任何额外说明文字。\n"
+    "输出的 JSON 必须包含以下字段：\n"
+    "  overall_score: 0.0–10.0 之间的浮点数（10.0 为完美排版）\n"
+    "  issues: 问题数组，每条包含 issue_type / severity / page / region / description / suggestion\n"
+    "  summary: 一句话总体评价\n"
+    "  needs_reformat: 布尔值，是否建议重新排版（score < 7.0 时通常为 true）\n\n"
+    "评分参考：\n"
+    "  9.0–10.0：排版优秀，无需修改\n"
+    "  7.0–8.9：排版良好，有少量可改进之处\n"
+    "  5.0–6.9：排版一般，存在明显问题需修正\n"
+    "  0.0–4.9：排版较差，建议重新排版\n"
+    "只报告通过视觉能实际观察到的问题，不要无中生有。"
+)
+
+
+def build_visual_review_prompt(
+    spec_summary: str = "",
+    page_count: int = 1,
+) -> str:
+    """
+    构造视觉审查用户 Prompt。
+
+    :param spec_summary: 排版规范摘要（帮助 LLM 理解预期格式）
+    :param page_count: 提供的页面截图数量
+    :return: 格式化后的用户 Prompt 字符串
+    """
+    parts = [f"请审查以下 {page_count} 页文档截图的排版质量。"]
+    if spec_summary:
+        parts.append(f"\n该文档应遵循的排版规范摘要：\n{spec_summary}")
+    parts.append("\n请从视觉角度检查并输出符合 Schema 的 JSON。")
+    return "\n".join(parts)

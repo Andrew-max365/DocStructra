@@ -56,3 +56,37 @@ class DocumentStructureAnalysis(BaseModel):
     """文档结构分析结果（用于 SmartJudge 仲裁）"""
 
     paragraphs: List[ParagraphRole] = []
+
+
+# ---------------------------------------------------------------------------
+# 视觉审查结果（Phase 3: 多模态视觉感知）
+# ---------------------------------------------------------------------------
+
+class VisualIssue(BaseModel):
+    """单条视觉审查问题（由多模态 LLM 产出）"""
+
+    # 问题类型
+    issue_type: Literal["margin", "alignment", "spacing", "font", "heading", "layout", "other"]
+    # 严重程度
+    severity: Literal["low", "medium", "high"]
+    # 问题所在页码（可选）
+    page: Optional[int] = None
+    # 问题区域描述（如"页面顶部"、"第3段"）
+    region: Optional[str] = None
+    # 问题描述
+    description: str
+    # 修复建议
+    suggestion: str
+
+
+class VisualReviewResult(BaseModel):
+    """视觉审查结果（整体评分 + 问题列表）"""
+
+    # 整体视觉评分（0.0–10.0，10 为完美）
+    overall_score: float = Field(ge=0.0, le=10.0)
+    # 视觉问题列表
+    issues: List[VisualIssue] = []
+    # 整体评价摘要
+    summary: str = ""
+    # 是否建议重排版
+    needs_reformat: bool = False

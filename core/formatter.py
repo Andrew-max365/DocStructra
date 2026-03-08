@@ -470,6 +470,11 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     body_before = float(body_cfg["space_before_pt"])
     body_after = float(body_cfg["space_after_pt"])
     first_line_chars = int(body_cfg["first_line_chars"])
+    # 支持每个角色独立的字体覆盖：body.font_name 优先于全局 fonts
+    body_zh_font = body_cfg.get("font_name", zh_font)
+    body_en_font = body_cfg.get("font_name_en", en_font)
+    body_bold = body_cfg.get("bold", None)  # None 表示不强制
+    body_italic = bool(body_cfg.get("italic", False)) if "italic" in body_cfg else None
 
     heading_cfg = cfg["heading"]
     caption_cfg = cfg.get("caption", None)
@@ -700,8 +705,12 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
 
             if body_alignment is not None:
                 p.paragraph_format.alignment = body_alignment
-            _apply_runs_font(p, zh_font, en_font, size_pt=body_size, force_bold=None,
-                             color_hex=body_cfg.get("color"))
+            _apply_runs_font(p, body_zh_font, body_en_font, size_pt=body_size,
+                             force_bold=body_bold, color_hex=body_cfg.get("color"))
+            # 支持 body 斜体覆盖
+            if body_italic is not None:
+                for run in iter_paragraph_runs(p):
+                    run.font.italic = body_italic
 
         elif role in ("h1", "h2", "h3"):
             hc = heading_cfg[role]
@@ -709,16 +718,26 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
             bold = bool(hc["bold"])
             before = float(hc["space_before_pt"])
             after = float(hc["space_after_pt"])
-            heading_align = _resolve_alignment(hc.get("alignment", "left"))
+            # 兼容 alignment 和旧字段名 align
+            heading_align = _resolve_alignment(hc.get("alignment") or hc.get("align", "left"))
+            # 支持标题级别独立行距；若未配置则继承正文行距
+            heading_line_sp = float(hc["line_spacing"]) if "line_spacing" in hc else body_line_spacing
+            # 支持标题级别独立字体；若未配置则继承全局字体
+            h_zh_font = hc.get("font_name", zh_font)
+            h_en_font = hc.get("font_name_en", en_font)
 
-            _apply_paragraph_common(p, body_line_spacing, before, after)
+            _apply_paragraph_common(p, heading_line_sp, before, after)
             p.paragraph_format.left_indent = Pt(0)
             p.paragraph_format.hanging_indent = Pt(0)
             p.paragraph_format.first_line_indent = Pt(0)
             if heading_align is not None:
                 p.paragraph_format.alignment = heading_align
-            _apply_runs_font(p, zh_font, en_font, size_pt=size, force_bold=bold,
+            _apply_runs_font(p, h_zh_font, h_en_font, size_pt=size, force_bold=bold,
                              color_hex=hc.get("color"))
+            # 支持标题斜体
+            if hc.get("italic") is not None:
+                for run in iter_paragraph_runs(p):
+                    run.font.italic = bool(hc["italic"])
             formatted_counter[role] += 1
 
         elif role == "caption":

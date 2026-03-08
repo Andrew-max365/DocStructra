@@ -9,3 +9,4 @@ python-dotenv>=1.0.0
 langgraph>=0.2.0
 chainlit>=1.0.0
 docling-core>=2.0.0
+pdf2image>=1.16.3
