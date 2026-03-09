@@ -70,9 +70,11 @@ async def on_chat_start():
 
     await cl.Message(
         content=(
-            "👋 欢迎使用 **Sturctra 智能文档排版助手**！\n\n"
+            "👋 欢迎使用 **Structura 智能文档排版助手**！\n\n"
             "直接上传 `.docx` 文件即可开始全自动排版（极速规则 + 大模型智能纠错）。\n\n"
-            "💬 也可以直接发送消息与我对话。"
+            "📝 **排版指令**：使用 `/f` 或 `/format` 开头，对上次已排版的文档做增量修改，例如：\n"
+            "> `/f 把大标题改成红色，正文字号改成 14`\n\n"
+            "💬 **自由聊天**：直接发送消息（不加前缀）与我对话。"
         )
     ).send()
 
@@ -504,77 +506,102 @@ async def _handle_chat(text: str) -> None:
 '''
 
 
+def _is_format_command(text: str) -> bool:
+    """判断输入是否为排版指令（以 /f 或 /format 开头）。"""
+    t = text.strip()
+    return t == "/f" or t == "/format" or t.startswith("/f ") or t.startswith("/format ")
+
+
+def _extract_format_content(text: str) -> str:
+    """从排版指令中提取实际内容（去掉前缀 /f 或 /format）。"""
+    t = text.strip()
+    if t.startswith("/format "):
+        return t[len("/format "):].strip()
+    if t.startswith("/f "):
+        return t[len("/f "):].strip()
+    return ""
+
+
 async def _handle_chat(text: str) -> None:
-    """全自动路由：自动判断是聊天还是排版指令，且提供丝滑加载提示"""
+    """处理用户输入：通过指令前缀物理隔离排版需求与普通聊天。
+
+    - 以 /f 或 /format 开头 → 排版指令，对上次已排版文档做增量修改。
+    - 其他输入 → 普通聊天，以 Structura 角色直接回复。
+    """
     if not LLM_API_KEY:
         await cl.Message(
             content="💬 未配置 LLM API Key，暂无法进行对话或解析指令。"
-            # 🧹 已删除旧的 actions=_make_mode_actions()
         ).send()
         return
 
-    # 1. 极致体验：先发一个过渡提示，防止前端“假死”
-    thinking_msg = cl.Message(content="⏳ 正在理解您的意图...")
-    await thinking_msg.send()
-
-    # 2. 智能路由：交给底层的意图解析器去“猜”
-    try:
-        from agent.intent_parser import parse_formatting_intent
-        # 它会在后台悄悄问大模型：这句话是排版吗？如果不是，大模型会返回 {}
-        formatting_intent = await parse_formatting_intent(text)
-    except Exception as e:
-        formatting_intent = None
-        print(f"意图解析异常: {e}")
-
     # ════════════════════════════════════════════════════════════════════════
-    # 分支 A：大模型判定为排版指令 (成功提取到了属性)
+    # 分支 A：排版指令（以 /f 或 /format 开头）
     # ════════════════════════════════════════════════════════════════════════
-    if formatting_intent:
-        current_overrides: Dict[str, Any] = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
-        from ui.chainlit_app import _deep_merge_dicts
-        import copy
-        import json
+    if _is_format_command(text):
+        cmd_content = _extract_format_content(text)
 
-        new_overrides = _deep_merge_dicts(copy.deepcopy(current_overrides), formatting_intent)
-        cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
+        if not cmd_content:
+            await cl.Message(
+                content="⚠️ 请在命令后输入具体要求，例如：`/f 所有标题居中`"
+            ).send()
+            return
 
-        pretty_intent = json.dumps(formatting_intent, ensure_ascii=False, indent=2)
-        pretty_overrides = json.dumps(new_overrides, ensure_ascii=False, indent=2)
+        thinking_msg = cl.Message(content="⏳ 正在将您的指令翻译为排版配置...")
+        await thinking_msg.send()
 
-        input_bytes: bytes = cl.user_session.get(_KEY_INPUT_BYTES)
-        if input_bytes:
-            # 更新过渡提示为：准备重排文档
-            thinking_msg.content = (
-                f"✅ **指令已确认！**\n\n"
-                f"**本次修改：**\n```json\n{pretty_intent}\n```\n"
-                f"🚀 正在为您**重新生成文档**..."
+        try:
+            from agent.intent_parser import parse_formatting_intent
+            formatting_intent = await parse_formatting_intent(cmd_content)
+        except Exception as e:
+            formatting_intent = None
+            print(f"解析排版意图异常: {e}")
+
+        if formatting_intent:
+            current_overrides: Dict[str, Any] = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
+            new_overrides = _deep_merge_dicts(copy.deepcopy(current_overrides), formatting_intent)
+            cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
+
+            pretty_intent = json.dumps(formatting_intent, ensure_ascii=False, indent=2)
+
+            # 优先使用上一次已排版完成的文档做增量修改，保证不重新处理原始全文
+            base_bytes: bytes = (
+                cl.user_session.get(_KEY_OUTPUT_BYTES)
+                or cl.user_session.get(_KEY_INPUT_BYTES)
             )
-            await thinking_msg.update()
+            if base_bytes:
+                thinking_msg.content = (
+                    f"✅ **指令已确认！**\n\n"
+                    f"**增量修改：**\n```json\n{pretty_intent}\n```\n"
+                    f"🚀 正在对上次已排版文档进行增量修改..."
+                )
+                await thinking_msg.update()
 
-            filename: str = cl.user_session.get(_KEY_FILENAME, "document.docx")
-            max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
+                filename: str = cl.user_session.get(_KEY_FILENAME, "document.docx")
+                max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
 
-            # 🧹 核心修复：只传需要的参数，去掉 label_mode 和 use_react
-            await _process_file(
-                input_bytes, filename, max_iters,
-                overrides=new_overrides,
-            )
+                await _process_file(
+                    base_bytes, filename, max_iters,
+                    overrides=new_overrides,
+                )
+            else:
+                pretty_overrides = json.dumps(new_overrides, ensure_ascii=False, indent=2)
+                thinking_msg.content = (
+                    f"✅ **已记录您的排版偏好！** 下次上传文档时将自动应用。\n\n"
+                    f"**当前完整配置：**\n```json\n{pretty_overrides}\n```\n"
+                    f"💡 请直接上传 `.docx` 文件。"
+                )
+                await thinking_msg.update()
         else:
             thinking_msg.content = (
-                f"✅ **已记录您的排版偏好！** 下次上传文档时将自动应用。\n\n"
-                f"**当前完整配置：**\n```json\n{pretty_overrides}\n```\n"
-                f"💡 请直接上传 `.docx` 文件。"
+                "❌ 抱歉，未能从您的指令中提取出有效的排版属性，请换种说法重试。"
             )
             await thinking_msg.update()
 
         return
 
     # ════════════════════════════════════════════════════════════════════════
-    # 分支 B：大模型判定为普通聊天 (返回了空字典或解析失败)
+    # 分支 B：普通聊天（无 /f 或 /format 前缀，直接以 Structura 角色回复）
     # ════════════════════════════════════════════════════════════════════════
-    # 撤回刚才的“思考中”提示
-    await thinking_msg.remove()
-
     import openai as _openai
     history: List[dict] = cl.user_session.get(_KEY_CHAT_HISTORY, [])
     history.append({"role": "user", "content": text})
@@ -587,18 +614,19 @@ async def _handle_chat(text: str) -> None:
         reply_parts: List[str] = []
 
         async with await client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                                "你是 Structra 文档格式化助手。"
-                                "你可以帮助用户了解文档格式化知识、解答关于本工具的使用问题，也可以进行一般性的中文对话。"
-                        ),
-                    },
-                    *history[-_MAX_CHAT_HISTORY:],
-                ],
-                stream=True,
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是 Structura 文档格式化助手。"
+                        "你可以帮助用户了解文档格式化知识、解答关于本工具的使用问题，也可以进行一般性的中文对话。"
+                        "如果用户想对文档进行排版调整，请提醒他使用 `/f + 需求` 的命令格式。"
+                    ),
+                },
+                *history[-_MAX_CHAT_HISTORY:],
+            ],
+            stream=True,
         ) as stream:
             async for chunk in stream:
                 token = (chunk.choices[0].delta.content or "") if chunk.choices else ""
@@ -612,8 +640,6 @@ async def _handle_chat(text: str) -> None:
         cl.user_session.set(_KEY_CHAT_HISTORY, history)
     except Exception as e:
         await cl.Message(content=f"💬 对话失败：{e}").send()
-
-
 # ── User feedback handling ─────────────────────────────────────────────────
 
 async def _handle_feedback(message: cl.Message) -> None:
