@@ -50,6 +50,7 @@ _KEY_DIFF_ITEMS = "diff_items"
 _KEY_REPORT = "pending_report"
 _KEY_CHAT_HISTORY = "chat_history"
 _KEY_SPEC_OVERRIDES = "spec_overrides"
+_KEY_SPEC_PATH = "spec_path"
 
 # Maximum number of chat messages (user+assistant turns) to keep in session context.
 _MAX_CHAT_HISTORY = 20
@@ -67,6 +68,7 @@ async def on_chat_start():
     cl.user_session.set(_KEY_STATE, "ready")
     cl.user_session.set(_KEY_CHAT_HISTORY, [])
     cl.user_session.set(_KEY_SPEC_OVERRIDES, {})
+    cl.user_session.set(_KEY_SPEC_PATH, "specs/default.yaml")
 
     await cl.Message(
         content=(
@@ -87,6 +89,7 @@ async def on_chat_start():
     cl.user_session.set(_KEY_STATE, "ready")
     cl.user_session.set(_KEY_CHAT_HISTORY, [])
     cl.user_session.set(_KEY_SPEC_OVERRIDES, {})
+    cl.user_session.set(_KEY_SPEC_PATH, "specs/default.yaml")
 
     await cl.Message(
         content=(
@@ -132,6 +135,7 @@ async def on_message(message: cl.Message):
     if docx_file is not None:
         max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
         overrides = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
+        spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
 
         with open(docx_file.path, "rb") as fp:
             input_bytes = fp.read()
@@ -145,8 +149,10 @@ async def on_message(message: cl.Message):
             await thinking_msg.send()
 
             try:
-                from agent.intent_parser import parse_formatting_intent
-                formatting_intent = await parse_formatting_intent(text)
+                from agent.intent_parser import parse_formatting_request
+                parsed = await parse_formatting_request(text, current_spec_path=spec_path)
+                formatting_intent = parsed.get("overrides", {})
+                routed_spec = parsed.get("spec_path", spec_path)
             except Exception as e:
                 formatting_intent = None
                 print(f"解析排版意图异常: {e}")
@@ -154,12 +160,15 @@ async def on_message(message: cl.Message):
             if formatting_intent:
                 new_overrides = _deep_merge_dicts(copy.deepcopy(overrides), formatting_intent)
                 cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
+                cl.user_session.set(_KEY_SPEC_PATH, routed_spec)
                 overrides = new_overrides
+                spec_path = routed_spec
 
                 pretty = json.dumps(formatting_intent, ensure_ascii=False, indent=2)
                 thinking_msg.content = (
                     f"✅ **排版指令已确认！**\n\n"
                     f"```json\n{pretty}\n```\n\n"
+                    f"📚 模板：`{routed_spec}`\n"
                     f"⏳ 正在处理文档..."
                 )
                 await thinking_msg.update()
@@ -167,7 +176,7 @@ async def on_message(message: cl.Message):
                 # 没有解析出排版意图 → 可能是普通备注，忽略即可
                 await thinking_msg.remove()
 
-        await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None)
+        await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None, spec_path=spec_path)
         return
 
     # ── General chat fallback ────────────────────────────────────────────────
@@ -186,6 +195,7 @@ async def _process_file(
         filename: str,
         max_iters: int,
         overrides: dict = None,
+        spec_path: str = "specs/default.yaml",
 ) -> None:
     """Run the formatting pipeline and display results."""
 
@@ -195,7 +205,7 @@ async def _process_file(
     try:
         # 🌟 调用流式流程
         out_bytes, report = await _run_react_with_steps(
-            input_bytes, filename, max_iters, overrides=overrides
+            input_bytes, filename, max_iters, overrides=overrides, spec_path=spec_path
         )
     except Exception as e:
         processing_msg.content = f"❌ 处理失败：{e}"
@@ -245,6 +255,7 @@ async def _run_react_with_steps(
         filename: str,
         max_iters: int,
         overrides: dict = None,
+        spec_path: str = "specs/default.yaml",
 ) -> tuple:
     """Run the ReAct agent and display progress dynamically via streaming."""
     tmp_in = tmp_out = None
@@ -262,7 +273,7 @@ async def _run_react_with_steps(
 
         # 替代原本阻塞式的 asyncio.to_thread，使用 async for 优雅地“倾听”Agent的进展
         async for event in run_react_agent_stream(
-                tmp_in, tmp_out, max_iters=max_iters, overrides=overrides
+                tmp_in, tmp_out, spec_path=spec_path, max_iters=max_iters, overrides=overrides
         ):
             for node_name, state_update in event.items():
                 # 记录最终状态
@@ -418,8 +429,11 @@ async def _handle_chat(text: str) -> None:
         await thinking_msg.send()
 
         try:
-            from agent.intent_parser import parse_formatting_intent
-            formatting_intent = await parse_formatting_intent(cmd_content)
+            from agent.intent_parser import parse_formatting_request
+            current_spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
+            parsed = await parse_formatting_request(cmd_content, current_spec_path=current_spec_path)
+            formatting_intent = parsed.get("overrides", {})
+            routed_spec = parsed.get("spec_path", current_spec_path)
         except Exception as e:
             formatting_intent = None
             print(f"解析报错: {e}")
@@ -428,6 +442,7 @@ async def _handle_chat(text: str) -> None:
             current_overrides: Dict[str, Any] = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
             new_overrides = _deep_merge_dicts(copy.deepcopy(current_overrides), formatting_intent)
             cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
+            cl.user_session.set(_KEY_SPEC_PATH, routed_spec)
 
             pretty_intent = json.dumps(formatting_intent, ensure_ascii=False, indent=2)
             pretty_overrides = json.dumps(new_overrides, ensure_ascii=False, indent=2)
@@ -449,6 +464,7 @@ async def _handle_chat(text: str) -> None:
                 await _process_file(
                     input_bytes, filename, label_mode, use_react, max_iters,
                     overrides=new_overrides,
+                    spec_path=routed_spec,
                 )
             else:
                 thinking_msg.content = (
@@ -550,8 +566,11 @@ async def _handle_chat(text: str) -> None:
         await thinking_msg.send()
 
         try:
-            from agent.intent_parser import parse_formatting_intent
-            formatting_intent = await parse_formatting_intent(cmd_content)
+            from agent.intent_parser import parse_formatting_request
+            current_spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
+            parsed = await parse_formatting_request(cmd_content, current_spec_path=current_spec_path)
+            formatting_intent = parsed.get("overrides", {})
+            routed_spec = parsed.get("spec_path", current_spec_path)
         except Exception as e:
             formatting_intent = None
             print(f"解析排版意图异常: {e}")
@@ -560,6 +579,7 @@ async def _handle_chat(text: str) -> None:
             current_overrides: Dict[str, Any] = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
             new_overrides = _deep_merge_dicts(copy.deepcopy(current_overrides), formatting_intent)
             cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
+            cl.user_session.set(_KEY_SPEC_PATH, routed_spec)
 
             pretty_intent = json.dumps(formatting_intent, ensure_ascii=False, indent=2)
 
@@ -572,6 +592,7 @@ async def _handle_chat(text: str) -> None:
                 thinking_msg.content = (
                     f"✅ **指令已确认！**\n\n"
                     f"**增量修改：**\n```json\n{pretty_intent}\n```\n"
+                    f"📚 当前模板：`{routed_spec}`\n"
                     f"🚀 正在对上次已排版文档进行增量修改..."
                 )
                 await thinking_msg.update()
@@ -582,6 +603,7 @@ async def _handle_chat(text: str) -> None:
                 await _process_file(
                     base_bytes, filename, max_iters,
                     overrides=new_overrides,
+                    spec_path=routed_spec,
                 )
             else:
                 pretty_overrides = json.dumps(new_overrides, ensure_ascii=False, indent=2)

@@ -511,6 +511,15 @@ def build_intent_prompt() -> str:
     }},
     "h2": {{...}},
     "h3": {{...}}
+  }},
+  "page": {{
+    "margins_cm": {{"top": 浮点数, "bottom": 浮点数, "left": 浮点数, "right": 浮点数}},
+    "header_distance_cm": 浮点数,
+    "footer_distance_cm": 浮点数
+  }},
+  "_meta": {{
+    "domain": "default/academic/gov/contract",
+    "spec_path": "specs/default.yaml | specs/academic.yaml | specs/gov.yaml | specs/contract.yaml"
   }}
 }}
 
@@ -523,6 +532,8 @@ def build_intent_prompt() -> str:
 6. paragraph.alignment: 正文段落的全局对齐方式（justify=两端对齐, left=左对齐）
 7. heading.h1.alignment: 标题的对齐方式（注意：旧字段名 align 也可以，但推荐用 alignment）
 8. bold / italic: 加粗/斜体
+9. page.margins_cm: 页面页边距（单位厘米）
+10. _meta.domain/spec_path: 模板中心提示（可选），用于路由模板
 
 【注意事项】
 - 用户说"字体改为宋体"但未指定中英文时，设为 body.font_name
@@ -538,6 +549,20 @@ def build_intent_prompt() -> str:
 2. 复杂需搜索：遇到不懂的宏观规范，请调用 web_search 工具。
 3. 铁律：最终输出只准包含一个合法的 JSON 字符串，绝对不要有多余的解释文字！
 """
+
+
+def _split_meta_fields(payload: dict) -> tuple[dict, dict]:
+    """分离 _meta/spec_path/domain 等路由字段，避免污染 overrides。"""
+    if not isinstance(payload, dict):
+        return {}, {}
+    data = dict(payload)
+    meta = {}
+    if isinstance(data.get("_meta"), dict):
+        meta.update(data.pop("_meta"))
+    for k in ("spec_path", "domain"):
+        if k in data and isinstance(data[k], str):
+            meta[k] = data.pop(k)
+    return data, meta
 
 
 # ==========================================
@@ -594,6 +619,36 @@ async def parse_formatting_intent(user_text: str) -> dict:
     except Exception as e:
         print(f"❌ [Error] 解析排版意图异常: {e}")
         return {}
+
+
+async def parse_formatting_request(
+    user_text: str,
+    *,
+    current_spec_path: str = "specs/default.yaml",
+) -> dict:
+    """高级入口：返回 overrides + 模板路由决策。
+
+    保留 Agent 能力：
+    - 先执行 LLM ReAct 解析（可工具搜索）
+    - 再结合模板中心路由进行稳健落地
+    """
+    raw = await parse_formatting_intent(user_text)
+    overrides, llm_meta = _split_meta_fields(raw)
+    decision = resolve_template(
+        user_text,
+        current_spec_path=current_spec_path,
+        llm_meta=llm_meta,
+    )
+    return {
+        "overrides": overrides,
+        "spec_path": decision.spec_path,
+        "template": {
+            "domain": decision.domain,
+            "confidence": decision.confidence,
+            "source": decision.source,
+            "reason": decision.reason,
+        },
+    }
 
 
 # ==========================================

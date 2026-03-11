@@ -3,7 +3,7 @@ import re
 from typing import Dict, List, Set
 from collections import Counter
 
-from docx.shared import Pt, RGBColor
+from docx.shared import Pt, RGBColor, Cm
 from docx.enum.text import WD_LINE_SPACING
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
@@ -93,6 +93,43 @@ def _is_in_table_cell(p: Paragraph) -> bool:
     parent = p._p.getparent()
     return parent is not None and parent.tag == _qn("w:tc")
 
+
+
+def _apply_page_layout(doc, page_cfg: dict) -> int:
+    """Apply section-level page layout settings; returns changed section count."""
+    if not page_cfg:
+        return 0
+
+    changed = 0
+    for sec in getattr(doc, "sections", []):
+        touched = False
+        try:
+            margins = page_cfg.get("margins_cm", {})
+            if isinstance(margins, dict):
+                top = margins.get("top")
+                bottom = margins.get("bottom")
+                left = margins.get("left")
+                right = margins.get("right")
+                if top is not None:
+                    sec.top_margin = Cm(float(top)); touched = True
+                if bottom is not None:
+                    sec.bottom_margin = Cm(float(bottom)); touched = True
+                if left is not None:
+                    sec.left_margin = Cm(float(left)); touched = True
+                if right is not None:
+                    sec.right_margin = Cm(float(right)); touched = True
+
+            if page_cfg.get("header_distance_cm") is not None:
+                sec.header_distance = Cm(float(page_cfg["header_distance_cm"]))
+                touched = True
+            if page_cfg.get("footer_distance_cm") is not None:
+                sec.footer_distance = Cm(float(page_cfg["footer_distance_cm"]))
+                touched = True
+        except Exception:
+            pass
+        if touched:
+            changed += 1
+    return changed
 def _autofit_tables(doc) -> int:
     """Set all top-level tables to auto-fit window width. Returns count."""
     count = 0
@@ -479,6 +516,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     heading_cfg = cfg["heading"]
     caption_cfg = cfg.get("caption", None)
     paragraph_cfg = cfg.get("paragraph", {})
+    page_cfg = cfg.get("page", {})
 
     cleanup_cfg = cfg.get("cleanup", {})
     max_blank_keep = int(cleanup_cfg.get("max_consecutive_blank_paragraphs", 1))
@@ -593,6 +631,10 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
         "formatted": {"counts": {}},
         "warnings": [],
     }
+    # 0) 页面级排版（section）
+    page_sections_changed = _apply_page_layout(doc, page_cfg)
+    report["actions"]["page_sections_changed"] = page_sections_changed
+
     # 1) 空段压缩/清理
     deleted_consecutive = _cleanup_consecutive_blanks(doc, max_blank_keep)
     report["actions"]["cleanup_consecutive_blanks_deleted"] = deleted_consecutive
