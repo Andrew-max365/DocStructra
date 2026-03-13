@@ -147,10 +147,11 @@ async def on_message(message: cl.Message):
         if text:
             thinking_msg = cl.Message(content="⏳ 正在解析您的排版要求...")
             await thinking_msg.send()
+            actual_cmd = _extract_format_content(text) if _is_format_command(text) else text
 
             try:
                 from agent.intent_parser import parse_formatting_request
-                parsed = await parse_formatting_request(text, current_spec_path=spec_path)
+                parsed = await parse_formatting_request(actual_cmd, current_spec_path=spec_path)
                 formatting_intent = parsed.get("overrides", {})
                 routed_spec = parsed.get("spec_path", spec_path)
             except Exception as e:
