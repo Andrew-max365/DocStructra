@@ -291,6 +291,7 @@ import requests
 from typing import Dict, Optional
 from duckduckgo_search import DDGS
 from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from agent.template_router import resolve_template
 
 # 尝试导入优质 API 密钥，如果没有配置则设为 None
 try:
