@@ -143,11 +143,37 @@ async def on_message(message: cl.Message):
         cl.user_session.set(_KEY_INPUT_BYTES, input_bytes)
         cl.user_session.set(_KEY_FILENAME, docx_file.name)
 
-        # ── 新增：若用户在发送文件时附带了文字要求，先解析为 overrides ──
+        # ── 新增：若用户在发送文件时附带了文字要求，先分类意图再处理 ──
         if text:
+            from agent.intent_classifier import classify_intent, IntentType
+            actual_cmd = _extract_format_content(text) if _is_format_command(text) else text
+            has_pending = bool(cl.user_session.get(_KEY_DIFF_ITEMS))
+            intent_result = classify_intent(actual_cmd, has_pending_proofread=has_pending)
+            intent = intent_result.intent
+
+            # AUDIT：上传文件后直接审阅
+            if intent == IntentType.AUDIT:
+                await _handle_audit(input_bytes)
+                return
+
+            # HEADER_FOOTER_TOC：页眉/页脚/页码/目录
+            if intent == IntentType.HEADER_FOOTER_TOC:
+                await _handle_header_footer_toc(input_bytes, actual_cmd, docx_file.name)
+                return
+
+            # PARTIAL_FORMAT：局部定向排版
+            if intent == IntentType.PARTIAL_FORMAT:
+                await _handle_partial_format(input_bytes, actual_cmd, docx_file.name)
+                return
+
+            # LOCATE_FORMAT：定位内容并重排
+            if intent == IntentType.LOCATE_FORMAT:
+                await _handle_locate_format(input_bytes, actual_cmd, docx_file.name)
+                return
+
+            # FORMAT / default：全文排版（原有逻辑）
             thinking_msg = cl.Message(content="⏳ 正在解析您的排版要求...")
             await thinking_msg.send()
-            actual_cmd = _extract_format_content(text) if _is_format_command(text) else text
 
             try:
                 from agent.intent_parser import parse_formatting_request
@@ -539,11 +565,337 @@ def _extract_format_content(text: str) -> str:
     return ""
 
 
-async def _handle_chat(text: str) -> None:
-    """处理用户输入：通过指令前缀物理隔离排版需求与普通聊天。
+# ── New feature handlers ───────────────────────────────────────────────────
 
-    - 以 /f 或 /format 开头 → 排版指令，对上次已排版文档做增量修改。
-    - 其他输入 → 普通聊天，以 Structura 角色直接回复。
+async def _handle_audit(doc_bytes: bytes) -> None:
+    """Feature 3：对上传的文档进行排版一致性审阅，返回问题列表。"""
+    import io
+    from docx import Document as _Document
+    from core.doc_audit import audit_document, format_audit_report
+    from core.parser import parse_docx_to_blocks
+
+    thinking_msg = cl.Message(content="🔍 正在分析文档排版一致性，请稍候...")
+    await thinking_msg.send()
+
+    try:
+        doc_buf = io.BytesIO(doc_bytes)
+        _, blocks = parse_docx_to_blocks(io.BytesIO(doc_bytes))
+        doc = _Document(doc_buf)
+        issues = audit_document(doc, blocks)
+        report_md = format_audit_report(issues)
+        thinking_msg.content = report_md
+        await thinking_msg.update()
+    except Exception as e:
+        thinking_msg.content = f"❌ 审阅过程中出错：{e}"
+        await thinking_msg.update()
+
+
+async def _handle_header_footer_toc(doc_bytes: bytes, user_text: str, filename: str) -> None:
+    """Feature 1：处理页眉/页脚/页码/目录操作，返回修改后的文档。"""
+    import io
+    from docx import Document as _Document
+    from core.header_footer_toc import (
+        set_header, set_footer, add_page_numbers, insert_toc,
+        parse_header_footer_command,
+    )
+    from core.docx_utils import get_zh_font, get_en_font
+
+    thinking_msg = cl.Message(content="⏳ 正在解析页眉/页脚/页码/目录指令...")
+    await thinking_msg.send()
+
+    try:
+        doc = _Document(io.BytesIO(doc_bytes))
+
+        # 解析用户自然语言指令
+        parsed_cmd = parse_header_footer_command(user_text)
+
+        # 如果本地规则解析为空，尝试 LLM 解析
+        if not parsed_cmd and LLM_API_KEY:
+            try:
+                from agent.intent_parser import _extract_json
+                import openai as _openai
+                from config import LLM_BASE_URL, LLM_MODEL
+                client = _openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=20.0)
+                resp = await client.chat.completions.create(
+                    model=LLM_MODEL,
+                    messages=[{
+                        "role": "system",
+                        "content": (
+                            "你是文档页眉/页脚/页码/目录解析器。从用户指令中提取操作参数，"
+                            "输出 JSON：{\"header\":{\"text\":\"...\"},\"footer\":{\"text\":\"...\"},"
+                            "\"page_numbers\":{\"position\":\"footer\",\"start_at\":1,\"show_total\":false},"
+                            "\"toc\":{\"title\":\"目录\"}}，仅包含用户提到的键。只输出 JSON。"
+                        ),
+                    }, {"role": "user", "content": user_text}],
+                    temperature=0.1, max_tokens=300,
+                )
+                parsed_cmd = _extract_json(resp.choices[0].message.content.strip()) or {}
+            except Exception as e:
+                print(f"LLM 页眉解析异常: {e}")
+
+        if not parsed_cmd:
+            thinking_msg.content = (
+                "❓ 未能识别页眉/页脚/页码/目录指令。\n\n"
+                "请更具体地描述，例如：\n"
+                "- 「在页眉中写上'华中科技大学'，居中显示」\n"
+                "- 「在页脚添加页码，从第1页开始」\n"
+                "- 「在文档开头添加目录」"
+            )
+            await thinking_msg.update()
+            return
+
+        # 当前字体配置
+        current_spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
+        try:
+            from core.spec import load_spec
+            spec = load_spec(current_spec_path)
+            zh_font = spec.raw.get("fonts", {}).get("zh", "宋体")
+            en_font = spec.raw.get("fonts", {}).get("en", "Times New Roman")
+        except Exception:
+            zh_font, en_font = "宋体", "Times New Roman"
+
+        actions_done = []
+
+        # 页眉
+        if "header" in parsed_cmd and parsed_cmd["header"]:
+            h_cfg = parsed_cmd["header"]
+            set_header(
+                doc,
+                text=h_cfg.get("text", ""),
+                font_name_zh=zh_font,
+                font_name_en=en_font,
+                font_size_pt=float(h_cfg.get("font_size_pt", 10.5)),
+                bold=bool(h_cfg.get("bold", False)),
+                alignment=h_cfg.get("alignment", "center"),
+            )
+            actions_done.append(f"✅ 已设置页眉：「{h_cfg.get('text', '')}」")
+
+        # 页脚
+        if "footer" in parsed_cmd and parsed_cmd["footer"]:
+            f_cfg = parsed_cmd["footer"]
+            set_footer(
+                doc,
+                text=f_cfg.get("text", ""),
+                font_name_zh=zh_font,
+                font_name_en=en_font,
+                font_size_pt=float(f_cfg.get("font_size_pt", 10.5)),
+                alignment=f_cfg.get("alignment", "center"),
+            )
+            actions_done.append(f"✅ 已设置页脚：「{f_cfg.get('text', '')}」")
+
+        # 页码
+        if "page_numbers" in parsed_cmd and parsed_cmd["page_numbers"]:
+            pn_cfg = parsed_cmd["page_numbers"]
+            add_page_numbers(
+                doc,
+                position=pn_cfg.get("position", "footer"),
+                alignment=pn_cfg.get("alignment", "center"),
+                show_total=bool(pn_cfg.get("show_total", False)),
+                font_name_zh=zh_font,
+                font_name_en=en_font,
+                start_at=pn_cfg.get("start_at"),
+            )
+            pos_label = "页眉" if pn_cfg.get("position") == "header" else "页脚"
+            start_label = f"（从第 {pn_cfg['start_at']} 页开始）" if pn_cfg.get("start_at") else ""
+            actions_done.append(f"✅ 已在{pos_label}中插入页码{start_label}")
+
+        # 目录
+        if "toc" in parsed_cmd and parsed_cmd["toc"]:
+            toc_cfg = parsed_cmd["toc"]
+            insert_toc(
+                doc,
+                title=toc_cfg.get("title", "目录"),
+                title_font_name_zh="黑体",
+                title_font_size_pt=18.0,
+                title_bold=True,
+                content_font_name_zh="宋体",
+                content_font_size_pt=12.0,
+                insert_position=int(toc_cfg.get("insert_position", 0)),
+            )
+            actions_done.append(
+                f"✅ 已在文档开头插入目录（标题：「{toc_cfg.get('title', '目录')}」，"
+                "小二黑体居中；内容：宋体小四，一级标题加粗）\n"
+                "⚠️ 目录内容需在 Microsoft Word 中按 **F9** 或「更新域」刷新显示。"
+            )
+
+        if not actions_done:
+            thinking_msg.content = "❓ 未识别到有效的操作指令，请重新描述。"
+            await thinking_msg.update()
+            return
+
+        # 保存并提供下载
+        out_buf = io.BytesIO()
+        doc.save(out_buf)
+        out_bytes = out_buf.getvalue()
+        cl.user_session.set(_KEY_OUTPUT_BYTES, out_bytes)
+
+        thinking_msg.content = "\n".join(actions_done)
+        await thinking_msg.update()
+
+        base_name = os.path.splitext(os.path.basename(filename))[0]
+        out_el = cl.File(
+            name=f"{base_name}_header_footer.docx",
+            content=out_bytes,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        await cl.Message(content="📥 下载修改后的文档：", elements=[out_el]).send()
+
+    except Exception as e:
+        thinking_msg.content = f"❌ 处理页眉/页脚/页码/目录时出错：{e}"
+        await thinking_msg.update()
+
+
+async def _handle_partial_format(doc_bytes: bytes, user_text: str, filename: str) -> None:
+    """Feature 2：局部/定向排版——只应用用户指定的特定格式属性。"""
+    import io
+    from docx import Document as _Document
+    from agent.intent_parser import parse_partial_format_request
+    from core.partial_formatter import apply_partial_format
+
+    thinking_msg = cl.Message(content="⏳ 正在解析局部排版指令...")
+    await thinking_msg.send()
+
+    try:
+        # 解析要修改的属性
+        parsed = await parse_partial_format_request(user_text)
+        overrides = parsed.get("overrides", {})
+        prop_name = parsed.get("property", "unknown")
+        desc = parsed.get("description", "")
+
+        if not overrides:
+            thinking_msg.content = (
+                "❓ 未能识别具体要修改的属性。\n\n"
+                "请更具体地描述，例如：\n"
+                "- 「只把正文行间距改为1.5倍」\n"
+                "- 「只改正文字号为12pt」\n"
+                "- 「只调整页面左边距为3cm」"
+            )
+            await thinking_msg.update()
+            return
+
+        doc = _Document(io.BytesIO(doc_bytes))
+        report = apply_partial_format(doc, overrides)
+
+        # 保存
+        out_buf = io.BytesIO()
+        doc.save(out_buf)
+        out_bytes = out_buf.getvalue()
+        cl.user_session.set(_KEY_OUTPUT_BYTES, out_bytes)
+
+        counts = report.get("counts", {})
+        counts_str = "、".join(f"{v} 个{k}段落" for k, v in counts.items() if k != "page_sections")
+        page_str = f"，调整了 {counts.get('page_sections', 0)} 个页面节" if counts.get("page_sections") else ""
+
+        thinking_msg.content = (
+            f"✅ **局部排版完成！**\n\n"
+            f"📝 修改项：{desc or prop_name}\n"
+            f"📊 影响范围：{counts_str or '无段落变更'}{page_str}\n\n"
+            "📥 文档已更新，其他格式保持不变。"
+        )
+        await thinking_msg.update()
+
+        base_name = os.path.splitext(os.path.basename(filename))[0]
+        out_el = cl.File(
+            name=f"{base_name}_partial.docx",
+            content=out_bytes,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        await cl.Message(content="📥 下载修改后的文档：", elements=[out_el]).send()
+
+    except Exception as e:
+        thinking_msg.content = f"❌ 局部排版处理出错：{e}"
+        await thinking_msg.update()
+
+
+async def _handle_locate_format(doc_bytes: bytes, user_text: str, filename: str) -> None:
+    """Feature 4：定位文档中特定内容并重新排版，使其与周围格式一致。"""
+    import io
+    from docx import Document as _Document
+    from agent.intent_parser import parse_locate_format_request
+    from core.locate_formatter import locate_and_reformat
+
+    thinking_msg = cl.Message(content="🔍 正在定位文档中的目标段落...")
+    await thinking_msg.send()
+
+    try:
+        # 解析定位请求
+        parsed = await parse_locate_format_request(user_text)
+        locate_text = parsed.get("locate_text", "")
+        format_action = parsed.get("format_action", "match_context")
+        overrides = parsed.get("overrides", {})
+        desc = parsed.get("description", "")
+
+        if not locate_text:
+            thinking_msg.content = (
+                "❓ 未能从您的描述中提取定位关键词。\n\n"
+                "请在消息中引用要定位的原文，例如：\n"
+                "「'【大四上学期】全力冲刺目标...' 这部分和其他地方格式不同，帮我重新排版」"
+            )
+            await thinking_msg.update()
+            return
+
+        doc = _Document(io.BytesIO(doc_bytes))
+        report = locate_and_reformat(doc, locate_text, format_action, overrides)
+
+        if report["changed_count"] == 0 and not report["matched_paragraphs"]:
+            thinking_msg.content = (
+                f"🔍 {report.get('message', '')}\n\n"
+                "💡 提示：请在消息中直接引用文档中的原文片段（无需完整引用，部分关键词即可）。"
+            )
+            await thinking_msg.update()
+            return
+
+        # 保存
+        out_buf = io.BytesIO()
+        doc.save(out_buf)
+        out_bytes = out_buf.getvalue()
+        cl.user_session.set(_KEY_OUTPUT_BYTES, out_bytes)
+
+        matched_texts = [f"「{m['text'][:40]}...」" for m in report["matched_paragraphs"][:3]]
+        matched_str = "\n".join(f"  - {t}" for t in matched_texts)
+
+        applied_fmt = report.get("applied_format", {})
+        fmt_desc_parts = []
+        if "font_size_pt" in applied_fmt:
+            fmt_desc_parts.append(f"字号 {applied_fmt['font_size_pt']}pt")
+        if "line_spacing" in applied_fmt:
+            fmt_desc_parts.append(f"行距 {applied_fmt['line_spacing']:.1f}倍")
+        if "bold" in applied_fmt:
+            fmt_desc_parts.append("加粗" if applied_fmt["bold"] else "取消加粗")
+        if "alignment" in applied_fmt:
+            fmt_desc_parts.append(f"对齐 {applied_fmt['alignment']}")
+        fmt_str = "、".join(fmt_desc_parts) if fmt_desc_parts else "（与周围段落保持一致）"
+
+        thinking_msg.content = (
+            f"✅ **定位排版完成！**\n\n"
+            f"📍 定位到 {len(report['matched_paragraphs'])} 个段落：\n{matched_str}\n\n"
+            f"🎨 应用格式：{fmt_str}\n\n"
+            f"📝 {report.get('message', '')}"
+        )
+        await thinking_msg.update()
+
+        base_name = os.path.splitext(os.path.basename(filename))[0]
+        out_el = cl.File(
+            name=f"{base_name}_located.docx",
+            content=out_bytes,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        await cl.Message(content="📥 下载修改后的文档：", elements=[out_el]).send()
+
+    except Exception as e:
+        thinking_msg.content = f"❌ 定位排版处理出错：{e}"
+        await thinking_msg.update()
+
+
+async def _handle_chat(text: str) -> None:
+    """处理用户输入：通过指令前缀及意图分类分发到各个处理分支。
+
+    - 以 /f 或 /format 开头 → 排版指令（增量修改）
+    - AUDIT 意图 → 文档排版审阅（一致性检查）
+    - HEADER_FOOTER_TOC 意图 → 页眉/页脚/页码/目录操作
+    - PARTIAL_FORMAT 意图 → 局部定向排版（只改某一项）
+    - LOCATE_FORMAT 意图 → 定位特定内容并重排
+    - 其他 → 普通聊天
     """
     if not LLM_API_KEY:
         await cl.Message(
@@ -620,6 +972,91 @@ async def _handle_chat(text: str) -> None:
             )
             await thinking_msg.update()
 
+        return
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 意图分类（用于分支 A2~A5，无需 /f 前缀）
+    # ════════════════════════════════════════════════════════════════════════
+    from agent.intent_classifier import classify_intent, IntentType
+    has_pending = bool(cl.user_session.get(_KEY_DIFF_ITEMS))
+    intent_result = classify_intent(text, has_pending_proofread=has_pending)
+    intent = intent_result.intent
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 分支 A2：文档排版审阅（AUDIT）
+    # ════════════════════════════════════════════════════════════════════════
+    if intent == IntentType.AUDIT:
+        base_bytes: bytes = (
+            cl.user_session.get(_KEY_OUTPUT_BYTES)
+            or cl.user_session.get(_KEY_INPUT_BYTES)
+        )
+        if not base_bytes:
+            await cl.Message(
+                content=(
+                    "📄 请先上传一个 `.docx` 文件，然后再让我进行排版审阅。\n\n"
+                    "💡 上传后，直接说「帮我审阅文档」或「检查格式一致性」即可。"
+                )
+            ).send()
+            return
+        await _handle_audit(base_bytes)
+        return
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 分支 A3：页眉/页脚/页码/目录（HEADER_FOOTER_TOC）
+    # ════════════════════════════════════════════════════════════════════════
+    if intent == IntentType.HEADER_FOOTER_TOC:
+        base_bytes = (
+            cl.user_session.get(_KEY_OUTPUT_BYTES)
+            or cl.user_session.get(_KEY_INPUT_BYTES)
+        )
+        if not base_bytes:
+            await cl.Message(
+                content=(
+                    "📄 请先上传一个 `.docx` 文件，然后再进行页眉/页脚/页码/目录操作。"
+                )
+            ).send()
+            return
+        filename: str = cl.user_session.get(_KEY_FILENAME, "document.docx")
+        await _handle_header_footer_toc(base_bytes, text, filename)
+        return
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 分支 A4：局部/定向排版（PARTIAL_FORMAT）
+    # ════════════════════════════════════════════════════════════════════════
+    if intent == IntentType.PARTIAL_FORMAT:
+        base_bytes = (
+            cl.user_session.get(_KEY_OUTPUT_BYTES)
+            or cl.user_session.get(_KEY_INPUT_BYTES)
+        )
+        if not base_bytes:
+            await cl.Message(
+                content=(
+                    "📄 请先上传一个 `.docx` 文件，再告诉我要修改哪一项。\n\n"
+                    "💡 例如：上传文档后说「只改正文行距为1.5倍」。"
+                )
+            ).send()
+            return
+        filename = cl.user_session.get(_KEY_FILENAME, "document.docx")
+        await _handle_partial_format(base_bytes, text, filename)
+        return
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 分支 A5：定位特定内容并重排（LOCATE_FORMAT）
+    # ════════════════════════════════════════════════════════════════════════
+    if intent == IntentType.LOCATE_FORMAT:
+        base_bytes = (
+            cl.user_session.get(_KEY_OUTPUT_BYTES)
+            or cl.user_session.get(_KEY_INPUT_BYTES)
+        )
+        if not base_bytes:
+            await cl.Message(
+                content=(
+                    "📄 请先上传一个 `.docx` 文件，然后告诉我哪段内容需要重新排版。"
+                )
+            ).send()
+            return
+        filename = cl.user_session.get(_KEY_FILENAME, "document.docx")
+        await _handle_locate_format(base_bytes, text, filename)
         return
 
     # ════════════════════════════════════════════════════════════════════════

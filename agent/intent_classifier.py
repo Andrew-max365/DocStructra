@@ -35,6 +35,10 @@ class IntentType(str, Enum):
     QUERY = "query"                # 询问排版状态 / 效果
     FEEDBACK = "feedback"          # 对校对建议的反馈
     VISUAL_REVIEW = "visual_review"  # 视觉审查需求（Phase 3）
+    AUDIT = "audit"                # 文档排版审阅/一致性检查
+    PARTIAL_FORMAT = "partial_format"  # 局部/定向排版（只改某一项）
+    LOCATE_FORMAT = "locate_format"    # 定位特定内容并重新排版
+    HEADER_FOOTER_TOC = "header_footer_toc"  # 页眉/页脚/页码/目录操作
     AMBIGUOUS = "ambiguous"        # 模糊需求，需追问
 
 
@@ -144,11 +148,51 @@ _FEEDBACK_KEYWORDS = [
     r"保留.*其余", r"只改.*第",
 ]
 
-# 视觉审查关键词（Phase 3）
+# 视觉审查关键词（Phase 3）- 仅匹配明确涉及视觉美观的关键词
 _VISUAL_REVIEW_KEYWORDS = [
-    r"视觉", r"审查", r"检查.*排版", r"看看排版", r"排版.*好不好",
+    r"视觉", r"审查", r"看看排版", r"排版.*好不好",
     r"视觉效果", r"跑偏了", r"不好看", r"看看.*效果",
     r"检查视觉", r"视觉检查", r"美观度",
+]
+
+# 文档审阅/一致性检查关键词
+_AUDIT_KEYWORDS = [
+    r"审阅", r"审核", r"检查.*格式", r"格式.*检查", r"一致性",
+    r"有没有.*问题", r"格式.*错误", r"排版.*错误", r"错误.*排版",
+    r"哪[里些].*不[对一]", r"帮.*看看", r"查一下", r"查.*排版",
+    r"格式.*规范", r"不规范", r"不符合", r"漏.*排版", r"忘.*排版",
+    r"有[些什么哪].*地方.*不[对统一规范]", r"检查.*一下",
+    r"括号.*混用", r"标点.*混用", r"字号.*不[同一致]",
+    r"标题.*不[同一]", r"是否.*规范",
+]
+
+# 局部/定向排版关键词（只改某一项）
+_PARTIAL_FORMAT_KEYWORDS = [
+    r"只[改修调]", r"仅[改修调]", r"只需要", r"只想",
+    r"单独[改修调]", r"只把.*改", r"只[要需]改",
+    r"不用全部", r"不用重新排版", r"不需要全文",
+    r"只修改.*正文", r"把.*[改修]成", r"只调整",
+    r"不[要需]改.*其他", r"只针对.*[改修调]",
+]
+
+# 页眉/页脚/页码/目录关键词
+_HEADER_FOOTER_TOC_KEYWORDS = [
+    r"页眉", r"页脚", r"页码", r"目录",
+    r"header", r"footer", r"page\s*number",
+    r"从第.*页.*页码", r"增加.*目录", r"插入.*目录", r"添加.*目录",
+    r"增加.*页码", r"插入.*页码", r"添加.*页码",
+    r"增加.*页眉", r"增加.*页脚", r"设置.*页眉", r"设置.*页脚",
+]
+
+# 定位并重新排版关键词
+_LOCATE_FORMAT_KEYWORDS = [
+    r"这.*部分.*怎么.*排版", r"这.*段.*格式.*不[同对]",
+    r"这里.*排版.*不[同对]", r"和.*其他.*不[同一]",
+    r"和.*其他.*地方.*不[同一]", r"重新排版.*这",
+    r"这.*排版.*不.*[对规范统一]",
+    r"你.*检查.*[一下这]", r"[找定]位.*重新排",
+    r"这一部分.*怎么.*和", r"这部分.*格式",
+    r"这.*格式.*[不对不一致]",
 ]
 
 
@@ -187,9 +231,25 @@ def classify_intent(user_text: str, has_pending_proofread: bool = False) -> Inte
     if has_pending_proofread and _match_any(text, _FEEDBACK_KEYWORDS):
         return IntentResult(intent=IntentType.FEEDBACK, confidence=0.9)
 
-    # 视觉审查关键词
+    # 页眉/页脚/页码/目录操作（最具体，最先检查）
+    if _match_any(text, _HEADER_FOOTER_TOC_KEYWORDS):
+        return IntentResult(intent=IntentType.HEADER_FOOTER_TOC, confidence=0.95)
+
+    # 定位特定内容并重排（在 VISUAL_REVIEW 之前，避免"检查"词误判）
+    if _match_any(text, _LOCATE_FORMAT_KEYWORDS):
+        return IntentResult(intent=IntentType.LOCATE_FORMAT, confidence=0.85)
+
+    # 视觉审查关键词（在 AUDIT 之前，保持原有优先级）
     if _match_any(text, _VISUAL_REVIEW_KEYWORDS):
         return IntentResult(intent=IntentType.VISUAL_REVIEW, confidence=0.9)
+
+    # 文档审阅/一致性检查
+    if _match_any(text, _AUDIT_KEYWORDS):
+        return IntentResult(intent=IntentType.AUDIT, confidence=0.9)
+
+    # 局部/定向排版（只改某一项）
+    if _match_any(text, _PARTIAL_FORMAT_KEYWORDS):
+        return IntentResult(intent=IntentType.PARTIAL_FORMAT, confidence=0.9)
 
     # 排版关键词
     if _match_any(text, _FORMAT_KEYWORDS):
@@ -229,6 +289,10 @@ def classify_intent_with_llm(user_text: str, context: Optional[IntentContext] = 
         "  - query：询问当前的排版进度、效果，或索要排版报告。\n"
         "  - feedback：针对之前的修改建议，表示接受或拒绝。\n"
         "  - visual_review：要求从视觉外观、美观度上对现有的排版结果进行审查。\n"
+        "  - audit：要求对文档进行排版一致性审阅，检查格式是否统一（如括号混用、标题格式不一、字号不一等）。\n"
+        "  - partial_format：用户只想修改文档的某一项具体属性（如只改行距、只改正文字号），而不是全文重新排版。\n"
+        "  - locate_format：用户指出文档中某段或某部分排版与其他地方不一致，要求定位并修复。\n"
+        "  - header_footer_toc：用户要求添加/修改页眉、页脚、页码或目录。\n"
         "  - ambiguous：需求过于模糊，无法归类。\n\n"
         "必须严格输出 JSON 格式，包含：{'intent': 'xxx', 'confidence': 0.0-1.0}。"
     )
