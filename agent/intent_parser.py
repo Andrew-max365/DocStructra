@@ -732,3 +732,134 @@ def _extract_json(text: str) -> Optional[dict]:
             pass
 
     return None
+
+
+# ==========================================
+# 局部/定向排版解析（Feature 2）
+# ==========================================
+async def parse_partial_format_request(user_text: str) -> dict:
+    """
+    解析用户的局部排版要求（只改某一项），返回 {"property": ..., "overrides": {...}}。
+
+    :param user_text: 用户的排版指令（已确认为 PARTIAL_FORMAT 意图）
+    :return: dict，包含 "property"（变更属性名）、"overrides"（spec overrides）
+    """
+    if not user_text or not LLM_API_KEY:
+        return {"property": "unknown", "overrides": {}}
+
+    client = openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=20.0)
+
+    system_prompt = """你是一个文档排版属性解析器。
+用户只想修改文档的某一项特定属性，不需要全文重排。
+请提取用户要修改的具体属性及其新值，以 JSON 格式输出。
+
+输出格式：
+{
+  "property": "line_spacing" | "body_font_size" | "heading_font_size" | "font_name" | "margins" | "indent" | "other",
+  "description": "一句话描述用户的修改需求",
+  "overrides": {  // spec overrides，只包含用户提到的字段
+    "body": {"line_spacing": 1.5},
+    ...
+  }
+}
+
+示例：
+- "只改行间距为1.5倍" → {"property": "line_spacing", "overrides": {"body": {"line_spacing": 1.5}}}
+- "只把正文字号改为12pt" → {"property": "body_font_size", "overrides": {"body": {"font_size_pt": 12.0}}}
+- "只把h1标题字号改为小二" → {"property": "heading_font_size", "overrides": {"heading": {"h1": {"font_size_pt": 18.0}}}}
+
+只输出 JSON，不要任何解释文字。"""
+
+    try:
+        response = await client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"用户指令：{user_text}"}
+            ],
+            temperature=0.1,
+            max_tokens=300,
+        )
+        content = response.choices[0].message.content.strip()
+        result = _extract_json(content)
+        if result and "overrides" in result:
+            return result
+    except Exception as e:
+        print(f"❌ [Error] 解析局部排版意图异常: {e}")
+
+    # fallback：直接调用完整解析
+    raw = await parse_formatting_intent(user_text)
+    overrides, _ = _split_meta_fields(raw)
+    return {"property": "unknown", "overrides": overrides}
+
+
+# ==========================================
+# 定位并重排特定内容（Feature 4）
+# ==========================================
+async def parse_locate_format_request(user_text: str) -> dict:
+    """
+    解析用户"定位某段内容并重新排版"的请求。
+
+    :param user_text: 用户输入（包含要定位的内容片段或描述，以及格式要求）
+    :return: dict，包含：
+        "locate_text": 要在文档中定位的关键文字（用于模糊搜索）
+        "format_action": "match_context" | "explicit"（用周围段落格式 or 显式指定）
+        "overrides": spec overrides（仅当 format_action == "explicit" 时有效）
+        "description": 人类可读描述
+    """
+    if not user_text or not LLM_API_KEY:
+        return {"locate_text": "", "format_action": "match_context", "overrides": {}, "description": ""}
+
+    client = openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=20.0)
+
+    system_prompt = """你是文档定位排版解析器。
+用户会提供一段他在文档里看到的文字（可能是原文引用或描述），并说明该段排版与周围不一致或需要修改。
+
+请提取：
+1. locate_text：用户想定位的关键内容片段（从用户消息中摘取最具代表性的原文片段，用于在文档中搜索）
+2. format_action：
+   - "match_context"：用户希望该段格式与周围其他段落保持一致（默认值）
+   - "explicit"：用户指定了具体的格式参数
+3. overrides：仅当 format_action 为 explicit 时才填写
+4. description：一句话总结用户的需求
+
+输出 JSON 格式：
+{
+  "locate_text": "需要定位的关键文字片段",
+  "format_action": "match_context",
+  "overrides": {},
+  "description": "将【大四上学期】这一段重新排版，使其与周围段落格式一致"
+}
+
+注意：
+- locate_text 要从用户原文中直接摘取，不要改写
+- 如果用户引用了很长的内容（多行），只取前30个字符即可
+- 只输出 JSON，不要任何解释"""
+
+    try:
+        response = await client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"用户请求：{user_text}"}
+            ],
+            temperature=0.1,
+            max_tokens=400,
+        )
+        content = response.choices[0].message.content.strip()
+        result = _extract_json(content)
+        if result and "locate_text" in result:
+            return result
+    except Exception as e:
+        print(f"❌ [Error] 解析定位排版意图异常: {e}")
+
+    # fallback：尝试从文本中提取引号内容作为 locate_text
+    import re as _re
+    m = _re.search(r"[「『"'\"'【](.*?)[」』"'\"'】]", user_text)
+    locate_text = m.group(1)[:50] if m else user_text[:30]
+    return {
+        "locate_text": locate_text,
+        "format_action": "match_context",
+        "overrides": {},
+        "description": f"定位并重排：{locate_text[:20]}...",
+    }
