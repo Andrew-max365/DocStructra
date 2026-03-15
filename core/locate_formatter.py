@@ -18,6 +18,9 @@ from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_LINE_SPACING, WD_ALIGN_PARAGRAPH
 
+from core.docx_utils import iter_paragraph_runs, iter_all_paragraphs, set_run_fonts
+from core.formatter import detect_role
+
 _EMU_PER_PT = 12700  # EMU（English Metric Units）每磅的转换系数
 
 
@@ -104,7 +107,7 @@ def _get_context_format(
     alignments = []
 
     for _, p in dominant_paras:
-        for run in p.runs:
+        for run in iter_paragraph_runs(p):
             if run.text.strip():
                 if run.font.size:
                     font_sizes.append(run.font.size.pt)

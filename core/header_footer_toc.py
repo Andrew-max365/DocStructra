@@ -11,9 +11,11 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from typing import Optional
 
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -57,23 +59,69 @@ def _add_instr_text(run_elem, instr: str) -> None:
     run_elem.append(instr_el)
 
 
-def _insert_page_num_field(paragraph, instr: str = "PAGE") -> None:
+def _insert_page_num_field(paragraph, instr: str = "PAGE", rPr_el=None) -> None:
     """
     在 paragraph 中插入 Word 页码域（PAGE / NUMPAGES 等）。
     生成格式为：{ PAGE } 或 { PAGE } / { NUMPAGES } 等。
+    可传入 rPr_el 以应用字体/字号/粗体等格式到域的每个 run。
     """
     # begin
     r1 = OxmlElement("w:r")
+    if rPr_el is not None:
+        r1.append(deepcopy(rPr_el))
     _add_fld_char(r1, "begin")
     paragraph._p.append(r1)
     # instrText
     r2 = OxmlElement("w:r")
+    if rPr_el is not None:
+        r2.append(deepcopy(rPr_el))
     _add_instr_text(r2, f" {instr} ")
     paragraph._p.append(r2)
     # end
     r3 = OxmlElement("w:r")
+    if rPr_el is not None:
+        r3.append(deepcopy(rPr_el))
     _add_fld_char(r3, "end")
     paragraph._p.append(r3)
+
+
+def _build_rPr_element(
+    font_name_zh: str,
+    font_name_en: str,
+    font_size_pt: float,
+    bold: bool,
+    italic: bool,
+) -> "OxmlElement":
+    """构建 w:rPr XML 元素，包含字体/字号/粗体/斜体设置。"""
+    rPr = OxmlElement("w:rPr")
+    rFonts = OxmlElement("w:rFonts")
+    rFonts.set(qn("w:ascii"), font_name_en)
+    rFonts.set(qn("w:hAnsi"), font_name_en)
+    rFonts.set(qn("w:eastAsia"), font_name_zh)
+    rFonts.set(qn("w:cs"), font_name_en)
+    rPr.append(rFonts)
+    sz_val = str(int(font_size_pt * 2))
+    sz = OxmlElement("w:sz")
+    sz.set(qn("w:val"), sz_val)
+    szCs = OxmlElement("w:szCs")
+    szCs.set(qn("w:val"), sz_val)
+    rPr.append(sz)
+    rPr.append(szCs)
+    if bold:
+        rPr.append(OxmlElement("w:b"))
+    if italic:
+        rPr.append(OxmlElement("w:i"))
+    return rPr
+
+
+# 页码格式 fmt 到 Word 域开关的映射
+_FMT_SWITCHES = {
+    "arabic": "",
+    "roman": r" \* roman",
+    "ROMAN": r" \* ROMAN",
+    "alpha": r" \* alphabetic",
+    "ALPHA": r" \* ALPHABETIC",
+}
 
 
 def _apply_run_format(
@@ -257,19 +305,70 @@ def add_page_numbers(
         italic=italic,
     )
 
+    # 构建域 run 的 rPr，用于给 PAGE / NUMPAGES 字段应用相同的字体格式
+    rPr_el = _build_rPr_element(font_name_zh, font_name_en, font_size_pt, bold, italic)
+
+    # 页码格式开关（arabic 不需要额外开关）
+    fmt_switch = _FMT_SWITCHES.get(fmt, "")
+    page_instr = f"PAGE{fmt_switch}"
+    numpage_instr = f"NUMPAGES{fmt_switch}"
+
     if show_total:
         # 格式：第 {PAGE} 页 / 共 {NUMPAGES} 页
         r_prefix = para.add_run("第 ")
         _apply_run_format(r_prefix, **rpr_kwargs)
-        _insert_page_num_field(para, "PAGE")
+        _insert_page_num_field(para, page_instr, rPr_el)
         r_mid = para.add_run(f" 页 {separator} 共 ")
         _apply_run_format(r_mid, **rpr_kwargs)
-        _insert_page_num_field(para, "NUMPAGES")
+        _insert_page_num_field(para, numpage_instr, rPr_el)
         r_suffix = para.add_run(" 页")
         _apply_run_format(r_suffix, **rpr_kwargs)
     else:
-        # 简单页码：{PAGE}
-        _insert_page_num_field(para, "PAGE")
+        # 简单页码：{PAGE}，应用字体格式
+        _insert_page_num_field(para, page_instr, rPr_el)
+
+
+def _configure_toc_styles(
+    doc: Document,
+    font_name_zh: str,
+    font_name_en: str,
+    font_size_pt: float,
+    bold_top_level: bool,
+) -> None:
+    """
+    修改或创建文档中的 TOC1/TOC2/TOC3 段落样式，应用目录内容字体格式。
+    Word 会在更新目录时将样式应用到各级条目。
+    """
+    for level in range(1, 4):
+        # Word 内置样式名为 "toc N"（小写+空格，python-docx 别名兼容）
+        style = None
+        for try_name in (f"toc {level}", f"TOC {level}", f"TOC{level}"):
+            try:
+                style = doc.styles[try_name]
+                break
+            except KeyError:
+                continue
+        if style is None:
+            try:
+                style = doc.styles.add_style(f"toc {level}", WD_STYLE_TYPE.PARAGRAPH)
+            except Exception:
+                continue
+        try:
+            style.font.size = Pt(font_size_pt)
+            style.font.bold = (bold_top_level and level == 1)
+            # 修改样式级别的 rFonts（中英文字体分离）
+            rPr = style.element.get_or_add_rPr()
+            existing_rFonts = rPr.find(qn("w:rFonts"))
+            if existing_rFonts is not None:
+                rPr.remove(existing_rFonts)
+            rFonts = OxmlElement("w:rFonts")
+            rFonts.set(qn("w:ascii"), font_name_en)
+            rFonts.set(qn("w:hAnsi"), font_name_en)
+            rFonts.set(qn("w:eastAsia"), font_name_zh)
+            rFonts.set(qn("w:cs"), font_name_en)
+            rPr.append(rFonts)
+        except Exception:
+            pass
 
 
 def insert_toc(
@@ -387,6 +486,15 @@ def insert_toc(
         ref_idx = list(body).index(ref) + 1
         body.insert(ref_idx, toc_para)
         body.insert(ref_idx, title_para)
+
+    # ── 4. 配置目录内容样式（TOC1/TOC2/TOC3）────────────────────────────────
+    _configure_toc_styles(
+        doc,
+        font_name_zh=content_font_name_zh,
+        font_name_en=content_font_name_en,
+        font_size_pt=content_font_size_pt,
+        bold_top_level=content_bold_top_level,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

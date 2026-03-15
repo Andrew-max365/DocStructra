@@ -20,6 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import asyncio
 import copy
 import json
+import re
 import tempfile
 from typing import Any, Dict, List, Set
 
@@ -590,6 +591,23 @@ async def _handle_audit(doc_bytes: bytes) -> None:
         await thinking_msg.update()
 
 
+def _safe_float(value, default: float) -> float:
+    """安全地将 value 转换为 float，忽略非数字字符（如"10.5pt"→10.5），失败时返回 default。"""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        # 尝试去掉非数字字符后再解析（如 "10.5pt"、"小五" 等）
+        m = re.search(r"[\d.]+", str(value))
+        if m:
+            try:
+                return float(m.group())
+            except ValueError:
+                pass
+    return default
+
+
 async def _handle_header_footer_toc(doc_bytes: bytes, user_text: str, filename: str) -> None:
     """Feature 1：处理页眉/页脚/页码/目录操作，返回修改后的文档。"""
     import io
@@ -598,7 +616,6 @@ async def _handle_header_footer_toc(doc_bytes: bytes, user_text: str, filename: 
         set_header, set_footer, add_page_numbers, insert_toc,
         parse_header_footer_command,
     )
-    from core.docx_utils import get_zh_font, get_en_font
 
     thinking_msg = cl.Message(content="⏳ 正在解析页眉/页脚/页码/目录指令...")
     await thinking_msg.send()
@@ -664,7 +681,7 @@ async def _handle_header_footer_toc(doc_bytes: bytes, user_text: str, filename: 
                 text=h_cfg.get("text", ""),
                 font_name_zh=zh_font,
                 font_name_en=en_font,
-                font_size_pt=float(h_cfg.get("font_size_pt", 10.5)),
+                font_size_pt=_safe_float(h_cfg.get("font_size_pt"), 10.5),
                 bold=bool(h_cfg.get("bold", False)),
                 alignment=h_cfg.get("alignment", "center"),
             )
@@ -678,7 +695,7 @@ async def _handle_header_footer_toc(doc_bytes: bytes, user_text: str, filename: 
                 text=f_cfg.get("text", ""),
                 font_name_zh=zh_font,
                 font_name_en=en_font,
-                font_size_pt=float(f_cfg.get("font_size_pt", 10.5)),
+                font_size_pt=_safe_float(f_cfg.get("font_size_pt"), 10.5),
                 alignment=f_cfg.get("alignment", "center"),
             )
             actions_done.append(f"✅ 已设置页脚：「{f_cfg.get('text', '')}」")

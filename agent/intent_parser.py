@@ -855,7 +855,7 @@ async def parse_locate_format_request(user_text: str) -> dict:
 
     # fallback：尝试从文本中提取引号内容作为 locate_text
     import re as _re
-    m = _re.search(r"[「『"'\"'【](.*?)[」』"'\"'】]", user_text)
+    m = _re.search(r'[「『\u201c\u2018\'【](.*?)[」』\u201d\u2019\'】]', user_text)
     locate_text = m.group(1)[:50] if m else user_text[:30]
     return {
         "locate_text": locate_text,
