@@ -14,6 +14,9 @@ from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_LINE_SPACING, WD_ALIGN_PARAGRAPH
 
+from core.docx_utils import iter_paragraph_runs, iter_all_paragraphs, set_run_fonts
+from core.formatter import detect_role
+
 _DEFAULT_FONT_SIZE_PT = 12.0  # 默认正文字号（pt）
 
 

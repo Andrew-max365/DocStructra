@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from docx import Document
 
+from core.docx_utils import iter_paragraph_runs as _iter_para_runs
+
 _FONT_SIZE_TOLERANCE_PT = 0.5   # 字号比较容差（pt）
 _MAJORITY_THRESHOLD = 0.5        # 视为"多数"的最低占比
 
@@ -62,7 +64,7 @@ def _get_para_text(paragraph) -> str:
 
 def _get_para_font_size(paragraph) -> Optional[float]:
     """获取段落第一个非空 run 的字号（pt），无则返回 None。"""
-    for run in paragraph.runs:
+    for run in _iter_para_runs(paragraph):
         if run.font.size:
             return run.font.size.pt
     return None
@@ -70,7 +72,7 @@ def _get_para_font_size(paragraph) -> Optional[float]:
 
 def _get_para_bold(paragraph) -> Optional[bool]:
     """获取段落第一个非空 run 的加粗状态。"""
-    for run in paragraph.runs:
+    for run in _iter_para_runs(paragraph):
         if run.text.strip():
             return run.font.bold
     return None
@@ -115,14 +117,17 @@ def audit_document(
     # 构建 (段落, index, 角色) 列表
     # 如果没有传入 labels，使用 detect_role 推断
     para_roles: List[Tuple[Any, int, str]] = []
+
+    # 预建索引：paragraph_index → block_id，避免每个段落都遍历全部 blocks（O(n²) → O(1)）
+    block_index_map: Dict[int, Any] = {}
+    if labels and blocks:
+        for b in blocks:
+            block_index_map[b.paragraph_index] = b.block_id
+
     for idx, p in enumerate(paragraphs):
         if labels and blocks:
-            # 通过 block_id 匹配标签
-            role = None
-            for b in blocks:
-                if b.paragraph_index == idx:
-                    role = labels.get(b.block_id)
-                    break
+            bid = block_index_map.get(idx)
+            role = labels.get(bid) if bid is not None else None
         else:
             role = None
 
