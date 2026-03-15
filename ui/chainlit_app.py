@@ -566,6 +566,36 @@ def _extract_format_content(text: str) -> str:
     return ""
 
 
+# 仅用于"一般格式"检测的关键词（排除页眉/页脚/页码/目录类关键词）
+_NON_HFT_FORMAT_KEYWORDS = [
+    r"字体", r"宋体", r"黑体", r"楷体", r"仿宋",
+    r"Times\s*New\s*Roman", r"Arial",
+    r"字号", r"小四", r"三号", r"四号", r"五号", r"小三", r"小二",
+    r"\d+\s*pt", r"\d+\s*磅",
+    r"行距", r"行间距", r"倍行距",
+    r"首行缩进", r"缩进",
+    r"加粗", r"斜体", r"下划线",
+    r"颜色", r"[黑红蓝绿白黄橙紫]色",
+    r"对齐", r"两端对齐",
+    r"段[前后]",
+]
+
+
+def _has_hft_intent(text: str) -> bool:
+    """检查文本是否包含页眉/页脚/页码/目录相关关键词。"""
+    from agent.intent_classifier import _match_any, _HEADER_FOOTER_TOC_KEYWORDS
+    return _match_any(text, _HEADER_FOOTER_TOC_KEYWORDS)
+
+
+def _has_non_hft_format_intent(text: str) -> bool:
+    """检查文本是否包含非页眉/页脚/页码/目录的一般格式排版需求（颜色、字号、字体、行距等）。"""
+    text_stripped = text.strip()
+    for pattern in _NON_HFT_FORMAT_KEYWORDS:
+        if re.search(pattern, text_stripped, re.IGNORECASE):
+            return True
+    return False
+
+
 # ── New feature handlers ───────────────────────────────────────────────────
 
 async def _handle_audit(doc_bytes: bytes) -> None:
@@ -935,6 +965,9 @@ async def _handle_chat(text: str) -> None:
         thinking_msg = cl.Message(content="⏳ 正在将您的指令翻译为排版配置...")
         await thinking_msg.send()
 
+        # 提前检测是否包含页眉/页脚/页码/目录需求，以便后续组合处理
+        needs_hft = _has_hft_intent(cmd_content)
+
         try:
             from agent.intent_parser import parse_formatting_request
             current_spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
@@ -943,7 +976,15 @@ async def _handle_chat(text: str) -> None:
             routed_spec = parsed.get("spec_path", current_spec_path)
         except Exception as e:
             formatting_intent = None
+            routed_spec = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
             print(f"解析排版意图异常: {e}")
+
+        base_bytes: bytes = (
+            cl.user_session.get(_KEY_OUTPUT_BYTES)
+            or cl.user_session.get(_KEY_INPUT_BYTES)
+        )
+        filename: str = cl.user_session.get(_KEY_FILENAME, "document.docx")
+        max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
 
         if formatting_intent:
             current_overrides: Dict[str, Any] = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
@@ -954,10 +995,6 @@ async def _handle_chat(text: str) -> None:
             pretty_intent = json.dumps(formatting_intent, ensure_ascii=False, indent=2)
 
             # 优先使用上一次已排版完成的文档做增量修改，保证不重新处理原始全文
-            base_bytes: bytes = (
-                cl.user_session.get(_KEY_OUTPUT_BYTES)
-                or cl.user_session.get(_KEY_INPUT_BYTES)
-            )
             if base_bytes:
                 thinking_msg.content = (
                     f"✅ **指令已确认！**\n\n"
@@ -967,20 +1004,35 @@ async def _handle_chat(text: str) -> None:
                 )
                 await thinking_msg.update()
 
-                filename: str = cl.user_session.get(_KEY_FILENAME, "document.docx")
-                max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
-
                 await _process_file(
                     base_bytes, filename, max_iters,
                     overrides=new_overrides,
                     spec_path=routed_spec,
                 )
+
+                # 如果指令中还包含页眉/页脚/页码/目录需求，对已更新的文档继续处理
+                if needs_hft:
+                    updated_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES)
+                    if updated_bytes:
+                        await _handle_header_footer_toc(updated_bytes, cmd_content, filename)
             else:
                 pretty_overrides = json.dumps(new_overrides, ensure_ascii=False, indent=2)
                 thinking_msg.content = (
                     f"✅ **已记录您的排版偏好！** 下次上传文档时将自动应用。\n\n"
                     f"**当前完整配置：**\n```json\n{pretty_overrides}\n```\n"
                     f"💡 请直接上传 `.docx` 文件。"
+                )
+                await thinking_msg.update()
+        elif needs_hft:
+            # 无 spec 样式修改，但有页眉/页脚/页码/目录需求，直接路由到对应处理器
+            if base_bytes:
+                thinking_msg.content = "⏳ 正在处理页眉/页脚/页码/目录指令..."
+                await thinking_msg.update()
+                await _handle_header_footer_toc(base_bytes, cmd_content, filename)
+            else:
+                thinking_msg.content = (
+                    "📄 请先上传一个 `.docx` 文件，然后再使用排版指令。\n\n"
+                    "💡 上传后，重新输入该指令即可。"
                 )
                 await thinking_msg.update()
         else:
@@ -1035,6 +1087,12 @@ async def _handle_chat(text: str) -> None:
             return
         filename: str = cl.user_session.get(_KEY_FILENAME, "document.docx")
         await _handle_header_footer_toc(base_bytes, text, filename)
+
+        # 如果指令中同时包含一般格式排版需求（颜色、字号、字体等），额外进行局部排版
+        if _has_non_hft_format_intent(text):
+            updated_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES)
+            if updated_bytes:
+                await _handle_partial_format(updated_bytes, text, filename)
         return
 
     # ════════════════════════════════════════════════════════════════════════
