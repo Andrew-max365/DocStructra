@@ -518,6 +518,35 @@ def build_intent_prompt() -> str:
     "header_distance_cm": 浮点数,
     "footer_distance_cm": 浮点数
   }},
+  "_hft": {{
+    "header": {{
+      "text": "页眉文字内容",
+      "font_size_pt": 浮点数,
+      "bold": 布尔值,
+      "alignment": "left/center/right"
+    }},
+    "footer": {{
+      "text": "页脚文字内容",
+      "font_size_pt": 浮点数,
+      "alignment": "left/center/right"
+    }},
+    "page_numbers": {{
+      "position": "header/footer",
+      "alignment": "left/center/right",
+      "show_total": 布尔值,
+      "start_at": 整数
+    }},
+    "toc": {{
+      "title": "目录标题文字（默认"目录"）",
+      "insert_position": 整数（插入位置，0为文档开头）
+    }},
+    "abstract": {{
+      "title": "摘要标题文字（默认"摘要"）",
+      "font_size_pt": 浮点数,
+      "bold": 布尔值,
+      "alignment": "left/center/right"
+    }}
+  }},
   "_meta": {{
     "domain": "default/academic/gov/contract",
     "spec_path": "specs/default.yaml | specs/academic.yaml | specs/gov.yaml | specs/contract.yaml"
@@ -535,6 +564,12 @@ def build_intent_prompt() -> str:
 8. bold / italic: 加粗/斜体
 9. page.margins_cm: 页面页边距（单位厘米）
 10. _meta.domain/spec_path: 模板中心提示（可选），用于路由模板
+11. _hft: 页眉/页脚/页码/目录/摘要操作（只在用户提及相关需求时才输出此字段）
+    - header: 设置页眉文字；footer: 设置页脚文字
+    - page_numbers: 插入页码，position 指定放在页眉("header")还是页脚("footer")，start_at 指定起始页码
+    - toc: 在文档中插入目录，insert_position=0 表示文档开头
+    - abstract: 设置摘要段落的样式（字号、对齐、加粗等）
+    - 以上子字段只输出用户提到的部分，未提到的不要输出
 
 【注意事项】
 - 用户说"字体改为宋体"但未指定中英文时，设为 body.font_name
@@ -552,10 +587,15 @@ def build_intent_prompt() -> str:
 """
 
 
-def _split_meta_fields(payload: dict) -> tuple[dict, dict]:
-    """分离 _meta/spec_path/domain 等路由字段，避免污染 overrides。"""
+def _split_meta_fields(payload: dict) -> tuple[dict, dict, dict]:
+    """分离 _meta/spec_path/domain 等路由字段和 _hft 页眉页脚目录字段，避免污染 overrides。
+
+    Returns:
+        (overrides, meta, hft_actions) — overrides 是 spec 覆盖字段，meta 是路由字段，
+        hft_actions 是页眉/页脚/页码/目录/摘要操作字段。
+    """
     if not isinstance(payload, dict):
-        return {}, {}
+        return {}, {}, {}
     data = dict(payload)
     meta = {}
     if isinstance(data.get("_meta"), dict):
@@ -563,7 +603,8 @@ def _split_meta_fields(payload: dict) -> tuple[dict, dict]:
     for k in ("spec_path", "domain"):
         if k in data and isinstance(data[k], str):
             meta[k] = data.pop(k)
-    return data, meta
+    hft_actions = data.pop("_hft", {}) or {}
+    return data, meta, hft_actions
 
 
 # ==========================================
@@ -627,14 +668,15 @@ async def parse_formatting_request(
     *,
     current_spec_path: str = "specs/default.yaml",
 ) -> dict:
-    """高级入口：返回 overrides + 模板路由决策。
+    """高级入口：返回 overrides + 模板路由决策 + HFT 操作。
 
     保留 Agent 能力：
     - 先执行 LLM ReAct 解析（可工具搜索）
     - 再结合模板中心路由进行稳健落地
+    - 同时提取页眉/页脚/页码/目录/摘要操作（_hft 字段）
     """
     raw = await parse_formatting_intent(user_text)
-    overrides, llm_meta = _split_meta_fields(raw)
+    overrides, llm_meta, hft_actions = _split_meta_fields(raw)
     decision = resolve_template(
         user_text,
         current_spec_path=current_spec_path,
@@ -642,6 +684,7 @@ async def parse_formatting_request(
     )
     return {
         "overrides": overrides,
+        "hft_actions": hft_actions,
         "spec_path": decision.spec_path,
         "template": {
             "domain": decision.domain,
@@ -789,7 +832,7 @@ async def parse_partial_format_request(user_text: str) -> dict:
 
     # fallback：直接调用完整解析
     raw = await parse_formatting_intent(user_text)
-    overrides, _ = _split_meta_fields(raw)
+    overrides, _, _hft = _split_meta_fields(raw)
     return {"property": "unknown", "overrides": overrides}
 
 
@@ -862,4 +905,84 @@ async def parse_locate_format_request(user_text: str) -> dict:
         "format_action": "match_context",
         "overrides": {},
         "description": f"定位并重排：{locate_text[:20]}...",
+    }
+
+
+# ==========================================
+# 文档审阅 + 增量排版解析（/r 命令）
+# ==========================================
+async def parse_review_request(user_text: str) -> dict:
+    """
+    解析 /r 命令中的用户要求。
+
+    /r 命令用于：
+    1. 对已上传文档进行排版审阅（识别格式不一致等问题）；
+    2. 若用户同时附带了排版要求，则以增量方式只修改指定内容，不动用户未提及的部分。
+
+    :param user_text: /r 命令后的内容（可为空字符串，表示纯审阅）
+    :return: dict，包含：
+        "has_requirements": bool — 是否有具体的增量排版要求
+        "overrides": dict — spec 增量修改字段（仅 has_requirements=True 时有效）
+        "hft_actions": dict — 页眉/页脚/页码/目录增量操作（仅 has_requirements=True 时有效）
+        "description": str — 需求描述
+    """
+    if not user_text or not user_text.strip():
+        return {"has_requirements": False, "overrides": {}, "hft_actions": {}, "description": ""}
+
+    if not LLM_API_KEY:
+        return {"has_requirements": False, "overrides": {}, "hft_actions": {}, "description": ""}
+
+    client = openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=20.0)
+
+    system_prompt = """你是一个文档增量排版解析器。
+用户发送的是"/r"审阅指令后的补充要求。你需要：
+1. 判断用户是否提出了具体的排版修改要求（has_requirements）
+2. 如果有，提取需要增量修改的内容（只改用户提到的，不动其他内容）
+
+输出 JSON 格式：
+{
+  "has_requirements": true/false,
+  "description": "一句话描述用户的增量要求",
+  "overrides": {
+    // 与 /f 命令相同的 spec 字段，只包含用户提到的
+    // 例如：{"body": {"line_spacing": 1.5}}
+  },
+  "hft_actions": {
+    // 页眉/页脚/页码/目录操作（仅在用户提到时才输出）
+    // "header": {"text": "..."}, "footer": {"text": "..."}, 
+    // "page_numbers": {"position": "footer", "start_at": 1}, "toc": {"title": "目录"}
+  }
+}
+
+注意：
+- 增量排版原则：只改用户明确提到的内容，其他格式保持不变
+- 如果用户仅说"帮我审阅"、"检查格式"等审阅类词语，has_requirements=false，overrides 和 hft_actions 为空
+- 只输出 JSON，不要任何解释文字"""
+
+    try:
+        response = await client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"用户的增量要求：{user_text}"}
+            ],
+            temperature=0.1,
+            max_tokens=400,
+        )
+        content = response.choices[0].message.content.strip()
+        result = _extract_json(content)
+        if result and "has_requirements" in result:
+            return result
+    except Exception as e:
+        print(f"❌ [Error] 解析审阅增量意图异常: {e}")
+
+    # fallback：假设有增量要求，尝试解析 spec overrides
+    raw = await parse_formatting_intent(user_text)
+    overrides, _, hft_actions = _split_meta_fields(raw)
+    has_req = bool(overrides or hft_actions)
+    return {
+        "has_requirements": has_req,
+        "overrides": overrides,
+        "hft_actions": hft_actions,
+        "description": user_text[:50] if has_req else "",
     }
