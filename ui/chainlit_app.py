@@ -75,8 +75,11 @@ async def on_chat_start():
         content=(
             "👋 欢迎使用 **Structura 智能文档排版助手**！\n\n"
             "直接上传 `.docx` 文件即可开始全自动排版（极速规则 + 大模型智能纠错）。\n\n"
-            "📝 **排版指令**：使用 `/f` 或 `/format` 开头，对上次已排版的文档做增量修改，例如：\n"
-            "> `/f 把大标题改成红色，正文字号改成 14`\n\n"
+            "📝 **排版指令** `/f`：使用 `/f` 或 `/format` 开头，让 AI 识别您的自然语言排版需求并应用，例如：\n"
+            "> `/f 把大标题改成红色，正文字号改成 14，在页眉中写上华中科技大学，并添加页码`\n\n"
+            "🔍 **审阅指令** `/r`：使用 `/r` 或 `/review` 开头，审阅文档排版问题；附带要求时只做增量修改，例如：\n"
+            "> `/r` — 仅审阅，列出排版问题\n"
+            "> `/r 把正文行距改为 1.5 倍` — 审阅 + 只改行距，不动其他格式\n\n"
             "💬 **自由聊天**：直接发送消息（不加前缀）与我对话。"
         )
     ).send()
@@ -144,65 +147,91 @@ async def on_message(message: cl.Message):
         cl.user_session.set(_KEY_INPUT_BYTES, input_bytes)
         cl.user_session.set(_KEY_FILENAME, docx_file.name)
 
-        # ── 新增：若用户在发送文件时附带了文字要求，先分类意图再处理 ──
+        # ── 若用户在发送文件时附带了文字要求，根据前缀分发 ──
         if text:
-            from agent.intent_classifier import classify_intent, IntentType
-            actual_cmd = _extract_format_content(text) if _is_format_command(text) else text
-            has_pending = bool(cl.user_session.get(_KEY_DIFF_ITEMS))
-            intent_result = classify_intent(actual_cmd, has_pending_proofread=has_pending)
-            intent = intent_result.intent
+            # /f 前缀 → 排版指令（解析全量 spec + HFT 需求后处理文档）
+            if _is_format_command(text):
+                cmd_content = _extract_format_content(text)
+                if cmd_content:
+                    thinking_msg = cl.Message(content="⏳ 正在解析您的排版要求...")
+                    await thinking_msg.send()
 
-            # AUDIT：上传文件后直接审阅
-            if intent == IntentType.AUDIT:
+                    try:
+                        from agent.intent_parser import parse_formatting_request
+                        parsed = await parse_formatting_request(cmd_content, current_spec_path=spec_path)
+                        formatting_intent = parsed.get("overrides", {})
+                        hft_actions = parsed.get("hft_actions", {})
+                        routed_spec = parsed.get("spec_path", spec_path)
+                    except Exception as e:
+                        formatting_intent = None
+                        hft_actions = {}
+                        routed_spec = spec_path
+                        print(f"解析排版意图异常: {e}")
+
+                    if formatting_intent:
+                        new_overrides = _deep_merge_dicts(copy.deepcopy(overrides), formatting_intent)
+                        cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
+                        cl.user_session.set(_KEY_SPEC_PATH, routed_spec)
+                        overrides = new_overrides
+                        spec_path = routed_spec
+
+                        pretty = json.dumps(formatting_intent, ensure_ascii=False, indent=2)
+                        thinking_msg.content = (
+                            f"✅ **排版指令已确认！**\n\n"
+                            f"```json\n{pretty}\n```\n\n"
+                            f"📚 模板：`{routed_spec}`\n"
+                            f"⏳ 正在处理文档..."
+                        )
+                        await thinking_msg.update()
+                    else:
+                        await thinking_msg.remove()
+
+                    await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None, spec_path=spec_path)
+
+                    # 如果有 HFT 需求（页眉/页脚/页码/目录），在格式化完成后继续处理
+                    if hft_actions:
+                        current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or input_bytes
+                        await _handle_header_footer_toc(
+                            current_bytes, cmd_content, docx_file.name, pre_parsed_cmd=hft_actions
+                        )
+                else:
+                    # /f 但没有内容 → 直接用已有偏好处理
+                    await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None, spec_path=spec_path)
+                return
+
+            # /r 前缀 → 审阅指令（先审阅，再可选增量修改）
+            if _is_review_command(text):
+                review_content = _extract_review_content(text)
+
+                # 步骤 1：审阅文档
                 await _handle_audit(input_bytes)
+
+                # 步骤 2：如有增量要求，解析并应用
+                if review_content:
+                    try:
+                        from agent.intent_parser import parse_review_request
+                        review_parsed = await parse_review_request(review_content)
+                        has_requirements = review_parsed.get("has_requirements", False)
+                        incremental_overrides = review_parsed.get("overrides", {})
+                        incremental_hft = review_parsed.get("hft_actions", {})
+                    except Exception as e:
+                        has_requirements = False
+                        incremental_overrides = {}
+                        incremental_hft = {}
+                        print(f"解析审阅增量意图异常: {e}")
+
+                    if has_requirements and incremental_overrides:
+                        await _handle_partial_format(input_bytes, review_content, docx_file.name)
+                    if has_requirements and incremental_hft:
+                        current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or input_bytes
+                        await _handle_header_footer_toc(
+                            current_bytes, review_content, docx_file.name, pre_parsed_cmd=incremental_hft
+                        )
                 return
 
-            # HEADER_FOOTER_TOC：页眉/页脚/页码/目录
-            if intent == IntentType.HEADER_FOOTER_TOC:
-                await _handle_header_footer_toc(input_bytes, actual_cmd, docx_file.name)
-                return
-
-            # PARTIAL_FORMAT：局部定向排版
-            if intent == IntentType.PARTIAL_FORMAT:
-                await _handle_partial_format(input_bytes, actual_cmd, docx_file.name)
-                return
-
-            # LOCATE_FORMAT：定位内容并重排
-            if intent == IntentType.LOCATE_FORMAT:
-                await _handle_locate_format(input_bytes, actual_cmd, docx_file.name)
-                return
-
-            # FORMAT / default：全文排版（原有逻辑）
-            thinking_msg = cl.Message(content="⏳ 正在解析您的排版要求...")
-            await thinking_msg.send()
-
-            try:
-                from agent.intent_parser import parse_formatting_request
-                parsed = await parse_formatting_request(actual_cmd, current_spec_path=spec_path)
-                formatting_intent = parsed.get("overrides", {})
-                routed_spec = parsed.get("spec_path", spec_path)
-            except Exception as e:
-                formatting_intent = None
-                print(f"解析排版意图异常: {e}")
-
-            if formatting_intent:
-                new_overrides = _deep_merge_dicts(copy.deepcopy(overrides), formatting_intent)
-                cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
-                cl.user_session.set(_KEY_SPEC_PATH, routed_spec)
-                overrides = new_overrides
-                spec_path = routed_spec
-
-                pretty = json.dumps(formatting_intent, ensure_ascii=False, indent=2)
-                thinking_msg.content = (
-                    f"✅ **排版指令已确认！**\n\n"
-                    f"```json\n{pretty}\n```\n\n"
-                    f"📚 模板：`{routed_spec}`\n"
-                    f"⏳ 正在处理文档..."
-                )
-                await thinking_msg.update()
-            else:
-                # 没有解析出排版意图 → 可能是普通备注，忽略即可
-                await thinking_msg.remove()
+            # 无前缀或其他文字 → 当作普通备注，直接全量处理文档（不解析排版要求）
+            # 将文字发给聊天，文档做标准处理
+            await _handle_chat(text)
 
         await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None, spec_path=spec_path)
         return
@@ -566,6 +595,22 @@ def _extract_format_content(text: str) -> str:
     return ""
 
 
+def _is_review_command(text: str) -> bool:
+    """判断输入是否为审阅指令（以 /r 或 /review 开头）。"""
+    t = text.strip()
+    return t == "/r" or t == "/review" or t.startswith("/r ") or t.startswith("/review ")
+
+
+def _extract_review_content(text: str) -> str:
+    """从审阅指令中提取实际内容（去掉前缀 /r 或 /review）。"""
+    t = text.strip()
+    if t.startswith("/review "):
+        return t[len("/review "):].strip()
+    if t.startswith("/r "):
+        return t[len("/r "):].strip()
+    return ""
+
+
 # 仅用于"一般格式"检测的关键词（排除页眉/页脚/页码/目录类关键词）
 _NON_HFT_FORMAT_KEYWORDS = [
     r"字体", r"宋体", r"黑体", r"楷体", r"仿宋",
@@ -638,8 +683,18 @@ def _safe_float(value, default: float) -> float:
     return default
 
 
-async def _handle_header_footer_toc(doc_bytes: bytes, user_text: str, filename: str) -> None:
-    """Feature 1：处理页眉/页脚/页码/目录操作，返回修改后的文档。"""
+async def _handle_header_footer_toc(
+    doc_bytes: bytes,
+    user_text: str,
+    filename: str,
+    *,
+    pre_parsed_cmd: dict | None = None,
+) -> None:
+    """处理页眉/页脚/页码/目录操作，返回修改后的文档。
+
+    :param pre_parsed_cmd: 已由 LLM 解析好的命令字典（来自 parse_formatting_request 返回的
+                           hft_actions）。若提供此参数，则跳过本地规则/LLM 二次解析步骤。
+    """
     import io
     from docx import Document as _Document
     from core.header_footer_toc import (
@@ -647,38 +702,42 @@ async def _handle_header_footer_toc(doc_bytes: bytes, user_text: str, filename: 
         parse_header_footer_command,
     )
 
-    thinking_msg = cl.Message(content="⏳ 正在解析页眉/页脚/页码/目录指令...")
+    thinking_msg = cl.Message(content="⏳ 正在处理页眉/页脚/页码/目录...")
     await thinking_msg.send()
 
     try:
         doc = _Document(io.BytesIO(doc_bytes))
 
-        # 解析用户自然语言指令
-        parsed_cmd = parse_header_footer_command(user_text)
+        if pre_parsed_cmd is not None:
+            # 使用调用方已解析好的命令，跳过二次解析
+            parsed_cmd = pre_parsed_cmd
+        else:
+            # 解析用户自然语言指令（本地规则优先）
+            parsed_cmd = parse_header_footer_command(user_text)
 
-        # 如果本地规则解析为空，尝试 LLM 解析
-        if not parsed_cmd and LLM_API_KEY:
-            try:
-                from agent.intent_parser import _extract_json
-                import openai as _openai
-                from config import LLM_BASE_URL, LLM_MODEL
-                client = _openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=20.0)
-                resp = await client.chat.completions.create(
-                    model=LLM_MODEL,
-                    messages=[{
-                        "role": "system",
-                        "content": (
-                            "你是文档页眉/页脚/页码/目录解析器。从用户指令中提取操作参数，"
-                            "输出 JSON：{\"header\":{\"text\":\"...\"},\"footer\":{\"text\":\"...\"},"
-                            "\"page_numbers\":{\"position\":\"footer\",\"start_at\":1,\"show_total\":false},"
-                            "\"toc\":{\"title\":\"目录\"}}，仅包含用户提到的键。只输出 JSON。"
-                        ),
-                    }, {"role": "user", "content": user_text}],
-                    temperature=0.1, max_tokens=300,
-                )
-                parsed_cmd = _extract_json(resp.choices[0].message.content.strip()) or {}
-            except Exception as e:
-                print(f"LLM 页眉解析异常: {e}")
+            # 如果本地规则解析为空，尝试 LLM 解析
+            if not parsed_cmd and LLM_API_KEY:
+                try:
+                    from agent.intent_parser import _extract_json
+                    import openai as _openai
+                    from config import LLM_BASE_URL, LLM_MODEL
+                    client = _openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=20.0)
+                    resp = await client.chat.completions.create(
+                        model=LLM_MODEL,
+                        messages=[{
+                            "role": "system",
+                            "content": (
+                                "你是文档页眉/页脚/页码/目录解析器。从用户指令中提取操作参数，"
+                                "输出 JSON：{\"header\":{\"text\":\"...\"},\"footer\":{\"text\":\"...\"},"
+                                "\"page_numbers\":{\"position\":\"footer\",\"start_at\":1,\"show_total\":false},"
+                                "\"toc\":{\"title\":\"目录\"}}，仅包含用户提到的键。只输出 JSON。"
+                            ),
+                        }, {"role": "user", "content": user_text}],
+                        temperature=0.1, max_tokens=300,
+                    )
+                    parsed_cmd = _extract_json(resp.choices[0].message.content.strip()) or {}
+                except Exception as e:
+                    print(f"LLM 页眉解析异常: {e}")
 
         if not parsed_cmd:
             thinking_msg.content = (
@@ -935,13 +994,10 @@ async def _handle_locate_format(doc_bytes: bytes, user_text: str, filename: str)
 
 
 async def _handle_chat(text: str) -> None:
-    """处理用户输入：通过指令前缀及意图分类分发到各个处理分支。
+    """处理用户输入：通过指令前缀分发到各个处理分支。
 
-    - 以 /f 或 /format 开头 → 排版指令（增量修改）
-    - AUDIT 意图 → 文档排版审阅（一致性检查）
-    - HEADER_FOOTER_TOC 意图 → 页眉/页脚/页码/目录操作
-    - PARTIAL_FORMAT 意图 → 局部定向排版（只改某一项）
-    - LOCATE_FORMAT 意图 → 定位特定内容并重排
+    - 以 /f 或 /format 开头 → 排版指令（LLM 识别全部排版需求，包括页眉/页脚/目录等）
+    - 以 /r 或 /review 开头 → 审阅指令（文档排版审阅 + 可选的增量排版）
     - 其他 → 普通聊天
     """
     if not LLM_API_KEY:
@@ -958,24 +1014,26 @@ async def _handle_chat(text: str) -> None:
 
         if not cmd_content:
             await cl.Message(
-                content="⚠️ 请在命令后输入具体要求，例如：`/f 所有标题居中`"
+                content=(
+                    "⚠️ 请在命令后输入具体要求，例如：\n"
+                    "> `/f 所有标题居中，正文字号12pt，在页脚添加页码`"
+                )
             ).send()
             return
 
         thinking_msg = cl.Message(content="⏳ 正在将您的指令翻译为排版配置...")
         await thinking_msg.send()
 
-        # 提前检测是否包含页眉/页脚/页码/目录需求，以便后续组合处理
-        needs_hft = _has_hft_intent(cmd_content)
-
         try:
             from agent.intent_parser import parse_formatting_request
             current_spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
             parsed = await parse_formatting_request(cmd_content, current_spec_path=current_spec_path)
             formatting_intent = parsed.get("overrides", {})
+            hft_actions = parsed.get("hft_actions", {})
             routed_spec = parsed.get("spec_path", current_spec_path)
         except Exception as e:
             formatting_intent = None
+            hft_actions = {}
             routed_spec = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
             print(f"解析排版意图异常: {e}")
 
@@ -986,156 +1044,127 @@ async def _handle_chat(text: str) -> None:
         filename: str = cl.user_session.get(_KEY_FILENAME, "document.docx")
         max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
 
-        if formatting_intent:
-            current_overrides: Dict[str, Any] = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
-            new_overrides = _deep_merge_dicts(copy.deepcopy(current_overrides), formatting_intent)
-            cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
-            cl.user_session.set(_KEY_SPEC_PATH, routed_spec)
+        has_spec_changes = bool(formatting_intent)
+        has_hft_changes = bool(hft_actions)
 
-            pretty_intent = json.dumps(formatting_intent, ensure_ascii=False, indent=2)
+        if not has_spec_changes and not has_hft_changes:
+            thinking_msg.content = (
+                "❌ 抱歉，未能从您的指令中提取出有效的排版属性，请换种说法重试。"
+            )
+            await thinking_msg.update()
+            return
 
-            # 优先使用上一次已排版完成的文档做增量修改，保证不重新处理原始全文
-            if base_bytes:
-                thinking_msg.content = (
-                    f"✅ **指令已确认！**\n\n"
-                    f"**增量修改：**\n```json\n{pretty_intent}\n```\n"
-                    f"📚 当前模板：`{routed_spec}`\n"
-                    f"🚀 正在对上次已排版文档进行增量修改..."
-                )
-                await thinking_msg.update()
-
-                await _process_file(
-                    base_bytes, filename, max_iters,
-                    overrides=new_overrides,
-                    spec_path=routed_spec,
-                )
-
-                # 如果指令中还包含页眉/页脚/页码/目录需求，对已更新的文档继续处理
-                if needs_hft:
-                    updated_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES)
-                    if updated_bytes:
-                        await _handle_header_footer_toc(updated_bytes, cmd_content, filename)
-            else:
+        if not base_bytes:
+            # 无文档：记录偏好供下次上传使用（仅 spec 部分）
+            if has_spec_changes:
+                current_overrides: Dict[str, Any] = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
+                new_overrides = _deep_merge_dicts(copy.deepcopy(current_overrides), formatting_intent)
+                cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
+                cl.user_session.set(_KEY_SPEC_PATH, routed_spec)
                 pretty_overrides = json.dumps(new_overrides, ensure_ascii=False, indent=2)
                 thinking_msg.content = (
                     f"✅ **已记录您的排版偏好！** 下次上传文档时将自动应用。\n\n"
                     f"**当前完整配置：**\n```json\n{pretty_overrides}\n```\n"
                     f"💡 请直接上传 `.docx` 文件。"
                 )
-                await thinking_msg.update()
-        elif needs_hft:
-            # 无 spec 样式修改，但有页眉/页脚/页码/目录需求，直接路由到对应处理器
-            if base_bytes:
-                thinking_msg.content = "⏳ 正在处理页眉/页脚/页码/目录指令..."
-                await thinking_msg.update()
-                await _handle_header_footer_toc(base_bytes, cmd_content, filename)
             else:
                 thinking_msg.content = (
                     "📄 请先上传一个 `.docx` 文件，然后再使用排版指令。\n\n"
                     "💡 上传后，重新输入该指令即可。"
                 )
-                await thinking_msg.update()
-        else:
+            await thinking_msg.update()
+            return
+
+        # ── 有文档：先应用 spec 样式修改，再应用 HFT 操作 ──────────────────
+        if has_spec_changes:
+            current_overrides = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
+            new_overrides = _deep_merge_dicts(copy.deepcopy(current_overrides), formatting_intent)
+            cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
+            cl.user_session.set(_KEY_SPEC_PATH, routed_spec)
+
+            pretty_intent = json.dumps(formatting_intent, ensure_ascii=False, indent=2)
             thinking_msg.content = (
-                "❌ 抱歉，未能从您的指令中提取出有效的排版属性，请换种说法重试。"
+                f"✅ **指令已确认！**\n\n"
+                f"**增量修改：**\n```json\n{pretty_intent}\n```\n"
+                f"📚 当前模板：`{routed_spec}`\n"
+                f"🚀 正在对文档进行增量修改..."
             )
             await thinking_msg.update()
 
+            await _process_file(
+                base_bytes, filename, max_iters,
+                overrides=new_overrides,
+                spec_path=routed_spec,
+            )
+
+        # ── 应用 HFT 操作（如页眉、页脚、页码、目录等）──────────────────────
+        if has_hft_changes:
+            # 使用最新处理结果（若 spec 已处理则用其输出，否则用原始输入）
+            current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or base_bytes
+            await _handle_header_footer_toc(
+                current_bytes, cmd_content, filename, pre_parsed_cmd=hft_actions
+            )
+
         return
 
     # ════════════════════════════════════════════════════════════════════════
-    # 意图分类（用于分支 A2~A5，无需 /f 前缀）
+    # 分支 B：审阅指令（以 /r 或 /review 开头）
     # ════════════════════════════════════════════════════════════════════════
-    from agent.intent_classifier import classify_intent, IntentType
-    has_pending = bool(cl.user_session.get(_KEY_DIFF_ITEMS))
-    intent_result = classify_intent(text, has_pending_proofread=has_pending)
-    intent = intent_result.intent
+    if _is_review_command(text):
+        review_content = _extract_review_content(text)
 
-    # ════════════════════════════════════════════════════════════════════════
-    # 分支 A2：文档排版审阅（AUDIT）
-    # ════════════════════════════════════════════════════════════════════════
-    if intent == IntentType.AUDIT:
-        base_bytes: bytes = (
+        base_bytes = (
             cl.user_session.get(_KEY_OUTPUT_BYTES)
             or cl.user_session.get(_KEY_INPUT_BYTES)
         )
         if not base_bytes:
             await cl.Message(
                 content=(
-                    "📄 请先上传一个 `.docx` 文件，然后再让我进行排版审阅。\n\n"
-                    "💡 上传后，直接说「帮我审阅文档」或「检查格式一致性」即可。"
+                    "📄 请先上传一个 `.docx` 文件，然后再使用审阅指令。\n\n"
+                    "💡 上传文档后：\n"
+                    "- `/r` — 审阅文档，列出排版问题\n"
+                    "- `/r 把正文行距改为1.5倍` — 审阅 + 只做指定的增量修改"
                 )
             ).send()
             return
+
+        filename = cl.user_session.get(_KEY_FILENAME, "document.docx")
+
+        # 步骤 1：始终执行文档审阅
         await _handle_audit(base_bytes)
+
+        # 步骤 2：若用户附带了增量排版要求，解析并只应用指定修改
+        if review_content:
+            try:
+                from agent.intent_parser import parse_review_request
+                review_parsed = await parse_review_request(review_content)
+                has_requirements = review_parsed.get("has_requirements", False)
+                incremental_overrides = review_parsed.get("overrides", {})
+                incremental_hft = review_parsed.get("hft_actions", {})
+            except Exception as e:
+                has_requirements = False
+                incremental_overrides = {}
+                incremental_hft = {}
+                print(f"解析审阅增量意图异常: {e}")
+
+            if has_requirements:
+                current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or base_bytes
+
+                # 应用增量 spec 修改（只改用户指定的字段）
+                if incremental_overrides:
+                    await _handle_partial_format(current_bytes, review_content, filename)
+
+                # 应用增量 HFT 操作
+                if incremental_hft:
+                    current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or current_bytes
+                    await _handle_header_footer_toc(
+                        current_bytes, review_content, filename, pre_parsed_cmd=incremental_hft
+                    )
+
         return
 
     # ════════════════════════════════════════════════════════════════════════
-    # 分支 A3：页眉/页脚/页码/目录（HEADER_FOOTER_TOC）
-    # ════════════════════════════════════════════════════════════════════════
-    if intent == IntentType.HEADER_FOOTER_TOC:
-        base_bytes = (
-            cl.user_session.get(_KEY_OUTPUT_BYTES)
-            or cl.user_session.get(_KEY_INPUT_BYTES)
-        )
-        if not base_bytes:
-            await cl.Message(
-                content=(
-                    "📄 请先上传一个 `.docx` 文件，然后再进行页眉/页脚/页码/目录操作。"
-                )
-            ).send()
-            return
-        filename: str = cl.user_session.get(_KEY_FILENAME, "document.docx")
-        await _handle_header_footer_toc(base_bytes, text, filename)
-
-        # 如果指令中同时包含一般格式排版需求（颜色、字号、字体等），额外进行局部排版
-        if _has_non_hft_format_intent(text):
-            updated_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES)
-            if updated_bytes:
-                await _handle_partial_format(updated_bytes, text, filename)
-        return
-
-    # ════════════════════════════════════════════════════════════════════════
-    # 分支 A4：局部/定向排版（PARTIAL_FORMAT）
-    # ════════════════════════════════════════════════════════════════════════
-    if intent == IntentType.PARTIAL_FORMAT:
-        base_bytes = (
-            cl.user_session.get(_KEY_OUTPUT_BYTES)
-            or cl.user_session.get(_KEY_INPUT_BYTES)
-        )
-        if not base_bytes:
-            await cl.Message(
-                content=(
-                    "📄 请先上传一个 `.docx` 文件，再告诉我要修改哪一项。\n\n"
-                    "💡 例如：上传文档后说「只改正文行距为1.5倍」。"
-                )
-            ).send()
-            return
-        filename = cl.user_session.get(_KEY_FILENAME, "document.docx")
-        await _handle_partial_format(base_bytes, text, filename)
-        return
-
-    # ════════════════════════════════════════════════════════════════════════
-    # 分支 A5：定位特定内容并重排（LOCATE_FORMAT）
-    # ════════════════════════════════════════════════════════════════════════
-    if intent == IntentType.LOCATE_FORMAT:
-        base_bytes = (
-            cl.user_session.get(_KEY_OUTPUT_BYTES)
-            or cl.user_session.get(_KEY_INPUT_BYTES)
-        )
-        if not base_bytes:
-            await cl.Message(
-                content=(
-                    "📄 请先上传一个 `.docx` 文件，然后告诉我哪段内容需要重新排版。"
-                )
-            ).send()
-            return
-        filename = cl.user_session.get(_KEY_FILENAME, "document.docx")
-        await _handle_locate_format(base_bytes, text, filename)
-        return
-
-    # ════════════════════════════════════════════════════════════════════════
-    # 分支 B：普通聊天（无 /f 或 /format 前缀，直接以 Structura 角色回复）
+    # 分支 C：普通聊天（无 /f 或 /r 前缀，直接以 Structura 角色回复）
     # ════════════════════════════════════════════════════════════════════════
     import openai as _openai
     history: List[dict] = cl.user_session.get(_KEY_CHAT_HISTORY, [])
@@ -1157,6 +1186,7 @@ async def _handle_chat(text: str) -> None:
                         "你是 Structura 文档格式化助手。"
                         "你可以帮助用户了解文档格式化知识、解答关于本工具的使用问题，也可以进行一般性的中文对话。"
                         "如果用户想对文档进行排版调整，请提醒他使用 `/f + 需求` 的命令格式。"
+                        "如果用户想审阅文档排版问题或进行增量修改，请提醒他使用 `/r + 需求` 的命令格式。"
                     ),
                 },
                 *history[-_MAX_CHAT_HISTORY:],
