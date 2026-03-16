@@ -86,29 +86,6 @@ async def on_chat_start():
         )
     ).send()
 
-"""   #引入 Slash 命令（/f 或 /format） 来实现物理隔离
-@cl.on_chat_start
-async def on_chat_start():
-    cl.user_session.set(_KEY_LABEL_MODE, LLM_MODE)
-    cl.user_session.set(_KEY_USE_REACT, False)
-    cl.user_session.set(_KEY_MAX_ITERS, REACT_MAX_ITERS)
-    cl.user_session.set(_KEY_STATE, "ready")
-    cl.user_session.set(_KEY_CHAT_HISTORY, [])
-    cl.user_session.set(_KEY_SPEC_OVERRIDES, {})
-    cl.user_session.set(_KEY_SPEC_PATH, "specs/default.yaml")
-
-    await cl.Message(
-        content=(
-            "👋 欢迎使用 **Sturctra 文档排版智能体**！\n\n"
-            f"当前模式：**{LLM_MODE}**。点击下方按钮切换模式，直接上传 `.docx` 文件即可开始排版。\n\n"
-            "💬 **自由交谈**：直接发送消息与我对话。\n"
-            "🎨 **修改排版**：请使用 `/f` 或 `/format` 开头。例如：\n"
-            "> `/f 把大标题改成红色，正文字号改成 14`"
-        ),
-        actions=_make_mode_actions(),
-    ).send()
-"""
-
 
 
 @cl.action_callback("accept_all_action")
@@ -152,6 +129,8 @@ async def on_message(message: cl.Message):
 
         cl.user_session.set(_KEY_INPUT_BYTES, input_bytes)
         cl.user_session.set(_KEY_FILENAME, docx_file.name)
+        # 新文件上传时清空上次的输出，避免增量操作误用旧文件
+        cl.user_session.set(_KEY_OUTPUT_BYTES, None)
 
         # ── 若用户在发送文件时附带了文字要求，根据前缀分发 ──
         if text:
@@ -806,7 +785,7 @@ async def _handle_header_footer_toc(
     import io
     from docx import Document as _Document
     from core.header_footer_toc import (
-        set_header, set_footer, add_page_numbers, insert_toc,
+        set_header, set_footer, add_page_numbers, format_toc_content,
         parse_header_footer_command, remove_header_border,
     )
 
@@ -913,24 +892,17 @@ async def _handle_header_footer_toc(
             start_label = f"（从第 {pn_cfg['start_at']} 页开始）" if pn_cfg.get("start_at") else ""
             actions_done.append(f"✅ 已在{pos_label}中插入页码{start_label}")
 
-        # 目录
-        if "toc" in parsed_cmd and parsed_cmd["toc"]:
-            toc_cfg = parsed_cmd["toc"]
-            insert_toc(
+        # 目录格式修改（修改已有目录的字体和字号，不插入新目录）
+        if "toc_format" in parsed_cmd and isinstance(parsed_cmd["toc_format"], dict):
+            fmt_cfg = parsed_cmd["toc_format"] or {}
+            count = format_toc_content(
                 doc,
-                title=toc_cfg.get("title", "目录"),
-                title_font_name_zh="黑体",
-                title_font_size_pt=18.0,
-                title_bold=True,
-                content_font_name_zh="宋体",
-                content_font_size_pt=12.0,
-                insert_position=int(toc_cfg.get("insert_position", 0)),
+                font_name_zh=fmt_cfg.get("font_name_zh", zh_font),
+                font_name_en=fmt_cfg.get("font_name_en", en_font),
+                font_size_pt=_safe_float(fmt_cfg.get("font_size_pt"), 12.0),
+                bold_top_level=bool(fmt_cfg.get("bold_top_level", False)),
             )
-            actions_done.append(
-                f"✅ 已在文档开头插入目录（标题：「{toc_cfg.get('title', '目录')}」，"
-                "小二黑体居中；内容：宋体小四，一级标题加粗）\n"
-                "⚠️ 目录内容需在 Microsoft Word 中按 **F9** 或「更新域」刷新显示。"
-            )
+            actions_done.append(f"✅ 已修改目录内容格式（共 {count} 个段落）")
 
         # 删除页眉横线
         if parsed_cmd.get("header_remove_border"):
