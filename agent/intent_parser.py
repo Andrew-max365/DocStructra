@@ -1,286 +1,3 @@
-# import os
-# import json
-# import re
-# import hashlib
-# import openai
-# from typing import Dict, Optional
-# from duckduckgo_search import DDGS    # ✅ 真正能用的免费搜索库
-# from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
-#
-#
-# CACHE_FILE_PATH = os.path.join(os.path.dirname(__file__), "search_cache.json")
-#
-#
-# def load_search_cache() -> Dict[str, str]:
-#     try:
-#         with open(CACHE_FILE_PATH, "r", encoding="utf-8") as f:
-#             return json.load(f)
-#     except (FileNotFoundError, json.JSONDecodeError):
-#         return {}
-#
-#
-# def save_search_cache(cache: Dict[str, str]):
-#     try:
-#         with open(CACHE_FILE_PATH, "w", encoding="utf-8") as f:
-#             json.dump(cache, f, ensure_ascii=False, indent=2)
-#     except Exception as e:
-#         print(f"⚠️ [Cache] 缓存保存失败: {e}")
-#
-#
-# SEARCH_CACHE = load_search_cache()
-#
-# # ==========================================
-# # 工具定义
-# # ==========================================
-# TOOLS = [
-#     {
-#         "type": "function",
-#         "function": {
-#             "name": "web_search",
-#             "description": "当用户要求按照特定的规范（如公文格式、特定期刊格式等）排版，且你不知道具体参数时，使用此工具搜索该规范的具体要求（字号、行距等相关信息）。",
-#             "parameters": {
-#                 "type": "object",
-#                 "properties": {
-#                     "query": {
-#                         "type": "string",
-#                         "description": "搜索的关键词，例如：'中文公文 标准排版 字号 行距'"
-#                     }
-#                 },
-#                 "required": ["query"]
-#             }
-#         }
-#     }
-# ]
-#
-#
-# # ==========================================
-# # 真实搜索函数实现
-# # ==========================================
-# def execute_web_search(query: str, use_cache: bool = True) -> str:
-#     global SEARCH_CACHE
-#
-#     if use_cache:
-#         query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()
-#         if query_hash in SEARCH_CACHE:
-#             print(f"💾 [Cache Hit] 命中搜索缓存: {query[:30]}...")
-#             return SEARCH_CACHE[query_hash]
-#
-#     print(f"🔍 [Search] 正在全网真实搜索: {query[:30]}...")
-#     try:
-#         # ✅ 使用 DuckDuckGo 执行真实搜索
-#         results = DDGS().text(query, max_results=3)
-#         if not results:
-#             return "未搜到相关具体规范，请根据通用标准推测。"
-#
-#         formatted_results = [f"- {res['body']}" for res in results]
-#         final_result = "\n".join(formatted_results)
-#
-#         if use_cache:
-#             SEARCH_CACHE[query_hash] = final_result
-#             save_search_cache(SEARCH_CACHE)
-#
-#         return final_result
-#     except Exception as e:
-#         print(f"❌ [Search Error] 搜索失败: {e}")
-#         return "搜索失败，请依赖你的基础知识进行排版。"
-#
-#
-# # ==========================================
-# # 动态加载外部常识库
-# # ==========================================
-# KNOWLEDGE_FILE_PATH = os.path.join(os.path.dirname(__file__), "formatting_knowledge.md")
-#
-#
-# def load_knowledge_base() -> str:
-#     try:
-#         with open(KNOWLEDGE_FILE_PATH, "r", encoding="utf-8") as f:
-#             return f.read()
-#     except FileNotFoundError:
-#         # 如果文件不存在，给一个内置的兜底常识
-#         return """
-#         1. 字号换算：小四=12.0pt，四号=14.0pt，小三=15.0pt，三号=16.0pt，二号=22.0pt。
-#         2. 常见颜色：红色=FF0000, 黑色=000000, 蓝色=0000FF。
-#         3. 字体规范：报告或正文必须默认使用 宋体 (Songti)；标题常用 黑体。
-#         """
-#
-#
-# # ==========================================
-# # 系统提示词 (✅ 恢复了你项目专属的 JSON 结构)
-# # ==========================================
-# def build_intent_prompt() -> str:
-#     return f"""你是一个专业的 Word 文档排版解析器，主要对现有文档进行格式美化，而不是生成文档。
-# 你的唯一任务是：提取用户的排版要求，并严格转化为指定的 JSON 格式。
-#
-# 【JSON 格式要求】（绝对不能改变此结构）
-# {{
-#   "body": {{"font_size_pt": 浮点数, "line_spacing": 浮点数, "color": "十六进制", "font_name": "字体名称"}},
-#   "heading": {{
-#     "h1": {{"font_size_pt": 浮点数, "color": "十六进制", "align": "center/left/right", "font_name": "字体名称"}},
-#     "h2": {{...}}
-#   }}
-# }}
-#
-# 【基础排版常识库】
-# {load_knowledge_base()}
-#
-# 【工具调用策略】
-# 1. 优先常识库：当用户指令简单（如改颜色、改小四字号、改成宋体），严禁调用搜索工具！
-# 2. 复杂需搜索：遇到不懂的宏观规范（如“国标公文格式”），请调用 web_search 工具。
-# 3. 铁律：最终输出只准包含一个合法的 JSON 字符串，绝对不要有任何多余的解释文字！
-# """
-#
-#
-# # ==========================================
-# # 核心解析函数（包含 ReAct 循环）
-# # ==========================================
-# async def parse_formatting_intent(user_text: str) -> dict:
-#     if not user_text or not LLM_API_KEY:
-#         return {}
-#
-#     client = openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=30.0)
-#     messages = [
-#         {"role": "system", "content": build_intent_prompt()},
-#         {"role": "user", "content": f"用户指令: {user_text}"}
-#     ]
-#
-#     try:
-#         print(f"\n👉 [Start] 准备解析指令...")
-#         response = await client.chat.completions.create(
-#             model=LLM_MODEL,
-#             messages=messages,
-#             tools=TOOLS,
-#             tool_choice="auto",
-#             temperature=0.1
-#         )
-#
-#         response_message = response.choices[0].message
-#         messages.append(response_message.model_dump())
-#
-#         # 处理工具调用
-#         if response_message.tool_calls:
-#             for tool_call in response_message.tool_calls:
-#                 if tool_call.function.name == "web_search":
-#                     args = json.loads(tool_call.function.arguments)
-#                     query = args.get("query", "")
-#
-#                     search_result = execute_web_search(query)
-#
-#                     messages.append({
-#                         "role": "tool",
-#                         "tool_call_id": tool_call.id,
-#                         "name": "web_search",
-#                         "content": search_result
-#                     })
-#
-#             print(f"👉 [ReAct] 获取外部知识完毕，正在生成最终 JSON...")
-#             final_response = await client.chat.completions.create(
-#                 model=LLM_MODEL,
-#                 messages=messages,
-#                 temperature=0.1,
-#                 max_tokens=500
-#             )
-#             final_content = final_response.choices[0].message.content.strip()
-#         else:
-#             final_content = response_message.content.strip()
-#
-#         print(f"✅ [Raw Output]:\n{final_content}")
-#
-#         # ✅ 使用 Kimi 写的强力 JSON 提取器
-#         return _extract_json(final_content) or {}
-#
-#     except Exception as e:
-#         print(f"❌ [Error] 解析流程异常: {e}")
-#         return {}
-#
-#
-# # ==========================================
-# # 强力 JSON 提取器 (保留 Kimi 的优秀逻辑)
-# # ==========================================
-# def _extract_json(text: str) -> Optional[dict]:
-#     if not text: return None
-#     text = text.strip()
-#
-#     if text.startswith("```json"):
-#         text = text[7:]
-#     elif text.startswith("```"):
-#         text = text[3:]
-#     if text.endswith("```"): text = text[:-3]
-#     text = text.strip()
-#
-#     try:
-#         return json.loads(text)
-#     except:
-#         pass
-#
-#     code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
-#     if code_block_match:
-#         try:
-#             return json.loads(code_block_match.group(1))
-#         except:
-#             pass
-#
-#     json_match = re.search(r'\{.*\}', text, re.DOTALL)
-#     if json_match:
-#         try:
-#             return json.loads(json_match.group(0))
-#         except:
-#             pass
-#
-#     return None
-#
-#
-# # ==========================================
-# # 校对建议反馈解析 (被误删的恢复部分)
-# # ==========================================
-# async def parse_feedback_intent(user_text: str, total_items: int) -> dict:
-#     """
-#     解析用户对于 LLM 校对建议的自然语言反馈。
-#     返回格式: {"intent": "accept_all"|"reject_all"|"partial"|"unknown", "rejected_indices": [1, 2...]}
-#     """
-#     if not user_text or not LLM_API_KEY:
-#         return {"intent": "unknown", "rejected_indices": []}
-#
-#     client = openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=15.0)
-#
-#     system_prompt = f"""你是一个专业的意图解析器。当前系统向用户展示了 {total_items} 条文档修改建议（编号从 1 到 {total_items}）。
-# 请解析用户刚刚输入的意思，并严格返回如下 JSON 格式：
-# {{
-#   "intent": "accept_all" | "reject_all" | "partial" | "unknown",
-#   "rejected_indices": [整数列表]
-# }}
-#
-# 【解析规则】
-# 1. "accept_all": 用户同意所有修改（如“好的”、“全部接受”、“没问题”）。rejected_indices 必须为 []。
-# 2. "reject_all": 用户拒绝所有修改（如“都不改”、“全部拒绝”、“不需要”）。rejected_indices 必须为 [1, 2, ..., {total_items}]。
-# 3. "partial": 用户只拒绝了部分，或只接受了部分（如“拒绝第2条”、“保留第1条其余不要”）。你需要在 rejected_indices 中列出所有**被拒绝**的编号。
-# 4. "unknown": 完全无关的闲聊，无法判断意图。
-#
-# 【输出铁律】
-# 绝对不准输出任何自然语言，只准输出一个合法的 JSON 字符串！
-# """
-#
-#     try:
-#         response = await client.chat.completions.create(
-#             model=LLM_MODEL,
-#             messages=[
-#                 {"role": "system", "content": system_prompt},
-#                 {"role": "user", "content": f"用户意见: {user_text}"}
-#             ],
-#             temperature=0.1,
-#             max_tokens=200
-#         )
-#         content = response.choices[0].message.content.strip()
-#
-#         # 复用文件中已经写好的强大 JSON 提取器
-#         result = _extract_json(content)
-#         if result and "intent" in result:
-#             return result
-#         return {"intent": "unknown", "rejected_indices": []}
-#     except Exception as e:
-#         print(f"❌ [Error] 解析反馈意图异常: {e}")
-#         return {"intent": "unknown", "rejected_indices": []}
-
-
 import os
 import json
 import re
@@ -536,10 +253,13 @@ def build_intent_prompt() -> str:
       "show_total": 布尔值,
       "start_at": 整数
     }},
-    "toc": {{
-      "title": "目录标题文字（默认"目录"）",
-      "insert_position": 整数（插入位置，0为文档开头）
+    "toc_format": {{
+      "font_size_pt": 浮点数,
+      "font_name_zh": "中文字体名（如宋体）",
+      "font_name_en": "英文字体名（如Times New Roman）",
+      "bold_top_level": 布尔值（一级目录条目是否加粗）
     }},
+    "header_remove_border": 布尔值（true表示删除页眉横线/分割线）,
     "abstract": {{
       "title": "摘要标题文字（默认"摘要"）",
       "font_size_pt": 浮点数,
@@ -567,7 +287,8 @@ def build_intent_prompt() -> str:
 11. _hft: 页眉/页脚/页码/目录/摘要操作（只在用户提及相关需求时才输出此字段）
     - header: 设置页眉文字；footer: 设置页脚文字
     - page_numbers: 插入页码，position 指定放在页眉("header")还是页脚("footer")，start_at 指定起始页码
-    - toc: 在文档中插入目录，insert_position=0 表示文档开头
+    - toc_format: 修改目录内容的字体和字号（只修改已有目录，不插入新目录）
+    - header_remove_border: 设为 true 可删除页眉下方的横线（分割线）
     - abstract: 设置摘要段落的样式（字号、对齐、加粗等）
     - 以上子字段只输出用户提到的部分，未提到的不要输出
 
@@ -677,6 +398,17 @@ async def parse_formatting_request(
     """
     raw = await parse_formatting_intent(user_text)
     overrides, llm_meta, hft_actions = _split_meta_fields(raw)
+
+    # 本地规则解析 HFT 操作作为兜底（能捕捉 LLM 可能遗漏的指令，如删除页眉横线）
+    try:
+        from core.header_footer_toc import parse_header_footer_command as _local_hft_parse
+        local_hft = _local_hft_parse(user_text)
+        for key, val in local_hft.items():
+            if key not in hft_actions:
+                hft_actions[key] = val
+    except Exception:
+        pass
+
     decision = resolve_template(
         user_text,
         current_spec_path=current_spec_path,
@@ -949,14 +681,17 @@ async def parse_review_request(user_text: str) -> dict:
   },
   "hft_actions": {
     // 页眉/页脚/页码/目录操作（仅在用户提到时才输出）
-    // "header": {"text": "..."}, "footer": {"text": "..."}, 
-    // "page_numbers": {"position": "footer", "start_at": 1}, "toc": {"title": "目录"}
+    // "header": {"text": "..."}, "footer": {"text": "..."},
+    // "page_numbers": {"position": "footer", "start_at": 1},
+    // "toc_format": {"font_size_pt": 12.0, "font_name_zh": "宋体"},
+    // "header_remove_border": true  ← 用户要求删除页眉横线时输出此项
   }
 }
 
 注意：
 - 增量排版原则：只改用户明确提到的内容，其他格式保持不变
 - 如果用户仅说"帮我审阅"、"检查格式"等审阅类词语，has_requirements=false，overrides 和 hft_actions 为空
+- 用户说"删除/去掉/移除页眉横线/分割线"时，hft_actions 中输出 "header_remove_border": true，并且 has_requirements=true
 - 只输出 JSON，不要任何解释文字"""
 
     try:
@@ -972,13 +707,33 @@ async def parse_review_request(user_text: str) -> dict:
         content = response.choices[0].message.content.strip()
         result = _extract_json(content)
         if result and "has_requirements" in result:
+            # 补充本地规则解析的 HFT 操作（捕捉 LLM 遗漏的，如删除页眉横线）
+            try:
+                from core.header_footer_toc import parse_header_footer_command as _local_hft_parse
+                local_hft = _local_hft_parse(user_text)
+                hft_dict = result.setdefault("hft_actions", {})
+                for key, val in local_hft.items():
+                    if key not in hft_dict:
+                        hft_dict[key] = val
+                if local_hft:
+                    result["has_requirements"] = True
+            except Exception:
+                pass
             return result
     except Exception as e:
         print(f"❌ [Error] 解析审阅增量意图异常: {e}")
 
-    # fallback：假设有增量要求，尝试解析 spec overrides
+    # fallback：假设有增量要求，尝试解析 spec overrides + 本地 HFT
     raw = await parse_formatting_intent(user_text)
     overrides, _, hft_actions = _split_meta_fields(raw)
+    try:
+        from core.header_footer_toc import parse_header_footer_command as _local_hft_parse
+        local_hft = _local_hft_parse(user_text)
+        for key, val in local_hft.items():
+            if key not in hft_actions:
+                hft_actions[key] = val
+    except Exception:
+        pass
     has_req = bool(overrides or hft_actions)
     return {
         "has_requirements": has_req,

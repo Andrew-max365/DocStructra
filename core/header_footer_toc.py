@@ -21,7 +21,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
-from core.docx_utils import set_run_fonts
+from core.docx_utils import set_run_fonts, iter_paragraph_runs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,6 +430,49 @@ def _configure_toc_styles(
             pass
 
 
+def format_toc_content(
+    doc: Document,
+    *,
+    font_name_zh: str = "宋体",
+    font_name_en: str = "Times New Roman",
+    font_size_pt: float = 12.0,
+    bold_top_level: bool = False,
+) -> int:
+    """
+    修改文档中目录内容的字体和字号。
+
+    对已使用 TOC 1/2/3 样式的段落直接应用格式，
+    并同步更新样式定义（确保 Word 更新目录后格式保持一致）。
+
+    :param doc:             Document 对象
+    :param font_name_zh:    中文字体
+    :param font_name_en:    英文字体
+    :param font_size_pt:    字号（磅）
+    :param bold_top_level:  一级目录条目是否加粗
+    :return:                修改的段落数量
+    """
+    # 1. 更新 TOC 样式定义（确保 Word 更新目录后格式一致）
+    _configure_toc_styles(doc, font_name_zh, font_name_en, font_size_pt, bold_top_level)
+
+    # 2. 直接格式化已有的 TOC 段落
+    toc_style_names = set()
+    for level in range(1, 4):
+        for name in (f"toc {level}", f"TOC {level}", f"TOC{level}"):
+            toc_style_names.add(name.lower())
+
+    count = 0
+    for para in doc.paragraphs:
+        style_name = (para.style.name or "").lower()
+        if style_name in toc_style_names:
+            is_top_level = style_name.endswith("1")
+            for run in iter_paragraph_runs(para):
+                run.font.size = Pt(font_size_pt)
+                run.font.bold = (bold_top_level and is_top_level)
+                set_run_fonts(run, zh_font=font_name_zh, en_font=font_name_en)
+            count += 1
+    return count
+
+
 def insert_toc(
     doc: Document,
     *,
@@ -637,20 +680,31 @@ def parse_header_footer_command(text: str) -> dict:
 
         result["page_numbers"] = page_num_cfg
 
-    # ── 目录 ─────────────────────────────────────────────────────────────────
-    if re.search(r"目录", text) and re.search(r"增加|添加|插入|生成|加上|创建", text):
-        toc_cfg: dict = {"title": "目录"}
+    # ── 目录格式修改（只修改目录内容的字体和字号，不再插入新目录）─────────────
+    if re.search(r"目录", text) and re.search(
+        r"字体|字号|改|修改|调整|格式|宋体|黑体|楷体|仿宋|Times|Arial|pt|磅|小四|四号|小三|三号",
+        text, re.IGNORECASE
+    ):
+        toc_fmt_cfg: dict = {}
 
-        # 目录标题自定义
-        m_title = re.search(r'目录.*?标题.*?[「『\u201c\u2018](.*?)[」』\u201d\u2019]', text)
-        if m_title:
-            toc_cfg["title"] = m_title.group(1).strip()
+        # 提取字号
+        size_map = {"小四": 12.0, "四号": 14.0, "小三": 15.0, "三号": 16.0, "小二": 18.0}
+        for name, size in size_map.items():
+            if re.search(name, text):
+                toc_fmt_cfg["font_size_pt"] = size
+                break
+        else:
+            m_size = re.search(r"(\d+(?:\.\d+)?)\s*pt", text, re.IGNORECASE)
+            if m_size:
+                toc_fmt_cfg["font_size_pt"] = float(m_size.group(1))
 
-        # 插入位置
-        m_pos = re.search(r"第\s*(\d+)\s*段", text)
-        if m_pos:
-            toc_cfg["insert_position"] = int(m_pos.group(1))
+        # 提取字体
+        chinese_fonts = {"宋体", "黑体", "楷体", "仿宋"}
+        for name in chinese_fonts:
+            if re.search(name, text):
+                toc_fmt_cfg["font_name_zh"] = name
+                break
 
-        result["toc"] = toc_cfg
+        result["toc_format"] = toc_fmt_cfg
 
     return result
