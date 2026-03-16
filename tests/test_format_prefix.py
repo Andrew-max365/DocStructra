@@ -36,6 +36,16 @@ for node in ast.parse(_SRC).body:
 _is_format_command = _GLOBS["_is_format_command"]
 _extract_format_content = _GLOBS["_extract_format_content"]
 
+# Also extract the /r command helpers
+for node in ast.parse(_SRC).body:
+    if isinstance(node, ast.FunctionDef) and node.name in (
+        "_is_review_command", "_extract_review_content"
+    ):
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "<ast>", "exec"), _GLOBS)
+
+_is_review_command = _GLOBS["_is_review_command"]
+_extract_review_content = _GLOBS["_extract_review_content"]
+
 
 # ── _is_format_command ──────────────────────────────────────────────────────
 
@@ -77,3 +87,44 @@ def test_is_format_command_negative(text):
 ])
 def test_extract_format_content(text, expected):
     assert _extract_format_content(text) == expected
+
+
+# ── _is_review_command ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text", [
+    "/r 把行距改为1.5倍",
+    "/review 检查格式",
+    "/r",
+    "/review",
+    "  /r   ",
+    "  /review   ",
+])
+def test_is_review_command_positive(text):
+    assert _is_review_command(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "你好",
+    "帮我检查排版",        # 无前缀，即使含审阅词也是普通聊天
+    "review 检查格式",    # 没有斜杠
+    "/rr 什么格式",       # 错误前缀
+    "/reviews 测试",      # 错误前缀
+    "",
+    "  ",
+])
+def test_is_review_command_negative(text):
+    assert _is_review_command(text) is False
+
+
+# ── _extract_review_content ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text, expected", [
+    ("/r 把行距改为1.5倍", "把行距改为1.5倍"),
+    ("/review 检查格式", "检查格式"),
+    ("  /r   正文加粗  ", "正文加粗"),
+    ("  /review   只修改标题  ", "只修改标题"),
+    ("/r", ""),      # 无内容（纯审阅）
+    ("/review", ""), # 无内容（纯审阅）
+])
+def test_extract_review_content(text, expected):
+    assert _extract_review_content(text) == expected

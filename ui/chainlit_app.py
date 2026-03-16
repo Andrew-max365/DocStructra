@@ -52,6 +52,7 @@ _KEY_REPORT = "pending_report"
 _KEY_CHAT_HISTORY = "chat_history"
 _KEY_SPEC_OVERRIDES = "spec_overrides"
 _KEY_SPEC_PATH = "spec_path"
+_KEY_HFT_ACTIONS = "hft_actions"  # 待应用的页眉/页脚/页码/目录操作（无文档时暂存）
 
 # Maximum number of chat messages (user+assistant turns) to keep in session context.
 _MAX_CHAT_HISTORY = 20
@@ -70,6 +71,7 @@ async def on_chat_start():
     cl.user_session.set(_KEY_CHAT_HISTORY, [])
     cl.user_session.set(_KEY_SPEC_OVERRIDES, {})
     cl.user_session.set(_KEY_SPEC_PATH, "specs/default.yaml")
+    cl.user_session.set(_KEY_HFT_ACTIONS, {})
 
     await cl.Message(
         content=(
@@ -202,31 +204,7 @@ async def on_message(message: cl.Message):
             # /r 前缀 → 审阅指令（先审阅，再可选增量修改）
             if _is_review_command(text):
                 review_content = _extract_review_content(text)
-
-                # 步骤 1：审阅文档
-                await _handle_audit(input_bytes)
-
-                # 步骤 2：如有增量要求，解析并应用
-                if review_content:
-                    try:
-                        from agent.intent_parser import parse_review_request
-                        review_parsed = await parse_review_request(review_content)
-                        has_requirements = review_parsed.get("has_requirements", False)
-                        incremental_overrides = review_parsed.get("overrides", {})
-                        incremental_hft = review_parsed.get("hft_actions", {})
-                    except Exception as e:
-                        has_requirements = False
-                        incremental_overrides = {}
-                        incremental_hft = {}
-                        print(f"解析审阅增量意图异常: {e}")
-
-                    if has_requirements and incremental_overrides:
-                        await _handle_partial_format(input_bytes, review_content, docx_file.name)
-                    if has_requirements and incremental_hft:
-                        current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or input_bytes
-                        await _handle_header_footer_toc(
-                            current_bytes, review_content, docx_file.name, pre_parsed_cmd=incremental_hft
-                        )
+                await _apply_review_flow(input_bytes, review_content, docx_file.name)
                 return
 
             # 无前缀或其他文字 → 当作普通备注，直接全量处理文档（不解析排版要求）
@@ -234,6 +212,13 @@ async def on_message(message: cl.Message):
             await _handle_chat(text)
 
         await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None, spec_path=spec_path)
+
+        # 若有之前暂存的 HFT 操作（无文档时通过 /f 记录），应用后清空
+        saved_hft = cl.user_session.get(_KEY_HFT_ACTIONS, {})
+        if saved_hft:
+            current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or input_bytes
+            await _handle_header_footer_toc(current_bytes, "", docx_file.name, pre_parsed_cmd=saved_hft)  # no extra user_text needed
+            cl.user_session.set(_KEY_HFT_ACTIONS, {})
         return
 
     # ── General chat fallback ────────────────────────────────────────────────
@@ -666,6 +651,47 @@ async def _handle_audit(doc_bytes: bytes) -> None:
         await thinking_msg.update()
 
 
+async def _apply_review_flow(base_bytes: bytes, review_content: str, filename: str) -> None:
+    """审阅流程公共入口：先审阅文档，若附带增量要求则只修改指定内容。
+
+    :param base_bytes: 要审阅/修改的文档字节
+    :param review_content: /r 命令后的增量要求（可为空字符串，表示纯审阅）
+    :param filename: 文件名（用于下载链接）
+    """
+    # 步骤 1：始终执行文档审阅
+    await _handle_audit(base_bytes)
+
+    # 步骤 2：若附带了增量排版要求，解析并只应用指定修改
+    if not review_content:
+        return
+
+    try:
+        from agent.intent_parser import parse_review_request
+        review_parsed = await parse_review_request(review_content)
+        has_requirements = review_parsed.get("has_requirements", False)
+        incremental_overrides = review_parsed.get("overrides", {})
+        incremental_hft = review_parsed.get("hft_actions", {})
+    except Exception as e:
+        has_requirements = False
+        incremental_overrides = {}
+        incremental_hft = {}
+        print(f"解析审阅增量意图异常: {e}")
+
+    if not has_requirements:
+        return
+
+    # 应用增量 spec 修改（只改用户指定的字段）
+    if incremental_overrides:
+        await _handle_partial_format(base_bytes, review_content, filename)
+
+    # 应用增量 HFT 操作（页眉/页脚/页码/目录）
+    if incremental_hft:
+        current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or base_bytes
+        await _handle_header_footer_toc(
+            current_bytes, review_content, filename, pre_parsed_cmd=incremental_hft
+        )
+
+
 def _safe_float(value, default: float) -> float:
     """安全地将 value 转换为 float，忽略非数字字符（如"10.5pt"→10.5），失败时返回 default。"""
     if value is None:
@@ -1055,23 +1081,32 @@ async def _handle_chat(text: str) -> None:
             return
 
         if not base_bytes:
-            # 无文档：记录偏好供下次上传使用（仅 spec 部分）
+            # 无文档：记录偏好供下次上传使用（spec + HFT 部分同步暂存）
+            msg_parts: List[str] = []
+
             if has_spec_changes:
                 current_overrides: Dict[str, Any] = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
                 new_overrides = _deep_merge_dicts(copy.deepcopy(current_overrides), formatting_intent)
                 cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
                 cl.user_session.set(_KEY_SPEC_PATH, routed_spec)
                 pretty_overrides = json.dumps(new_overrides, ensure_ascii=False, indent=2)
-                thinking_msg.content = (
+                msg_parts.append(
                     f"✅ **已记录您的排版偏好！** 下次上传文档时将自动应用。\n\n"
-                    f"**当前完整配置：**\n```json\n{pretty_overrides}\n```\n"
-                    f"💡 请直接上传 `.docx` 文件。"
+                    f"**当前完整配置：**\n```json\n{pretty_overrides}\n```"
                 )
-            else:
-                thinking_msg.content = (
-                    "📄 请先上传一个 `.docx` 文件，然后再使用排版指令。\n\n"
-                    "💡 上传后，重新输入该指令即可。"
+
+            if has_hft_changes:
+                current_hft: Dict[str, Any] = cl.user_session.get(_KEY_HFT_ACTIONS, {})
+                new_hft = {**current_hft, **hft_actions}
+                cl.user_session.set(_KEY_HFT_ACTIONS, new_hft)
+                pretty_hft = json.dumps(hft_actions, ensure_ascii=False, indent=2)
+                msg_parts.append(
+                    f"✅ **已记录页眉/页脚/页码/目录操作！** 下次上传文档时将自动应用。\n\n"
+                    f"**HFT 配置：**\n```json\n{pretty_hft}\n```"
                 )
+
+            msg_parts.append("💡 请直接上传 `.docx` 文件。")
+            thinking_msg.content = "\n\n".join(msg_parts)
             await thinking_msg.update()
             return
 
@@ -1129,38 +1164,7 @@ async def _handle_chat(text: str) -> None:
             return
 
         filename = cl.user_session.get(_KEY_FILENAME, "document.docx")
-
-        # 步骤 1：始终执行文档审阅
-        await _handle_audit(base_bytes)
-
-        # 步骤 2：若用户附带了增量排版要求，解析并只应用指定修改
-        if review_content:
-            try:
-                from agent.intent_parser import parse_review_request
-                review_parsed = await parse_review_request(review_content)
-                has_requirements = review_parsed.get("has_requirements", False)
-                incremental_overrides = review_parsed.get("overrides", {})
-                incremental_hft = review_parsed.get("hft_actions", {})
-            except Exception as e:
-                has_requirements = False
-                incremental_overrides = {}
-                incremental_hft = {}
-                print(f"解析审阅增量意图异常: {e}")
-
-            if has_requirements:
-                current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or base_bytes
-
-                # 应用增量 spec 修改（只改用户指定的字段）
-                if incremental_overrides:
-                    await _handle_partial_format(current_bytes, review_content, filename)
-
-                # 应用增量 HFT 操作
-                if incremental_hft:
-                    current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or current_bytes
-                    await _handle_header_footer_toc(
-                        current_bytes, review_content, filename, pre_parsed_cmd=incremental_hft
-                    )
-
+        await _apply_review_flow(base_bytes, review_content, filename)
         return
 
     # ════════════════════════════════════════════════════════════════════════
