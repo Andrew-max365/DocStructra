@@ -113,14 +113,20 @@ curl -X POST "[http://127.0.0.1:8000/v1/agent/format/bundle](http://127.0.0.1:80
 
 ```text
 MyAgent/
-├── agent/
-│   ├── graph/             # LangGraph ReAct Agent 核心 (节点、状态机、工作流)
-│   ├── intent_parser.py   # 增量排版自然语言意图解析器
-│   └── doc_analyzer.py    # LLM 分析与交互封装
-├── core/                  # 底层规则排版引擎，负责具体格式刷写
-├── service/               # FastAPI 路由与业务逻辑抽象层
-├── specs/                 # 排版规范 YAML 配置集 (gov, academic, default, contract)
-├── ui/                    # 交互前端 (chainlit_app.py 及 Diff 渲染工具)
-├── format_docx.py         # 命令行 CLI 入口程序
-└── api/server.py          # FastAPI 服务端启动入口
+├── agent/                    # Agent logic & LLM integration
+├── api/                      # FastAPI server
+├── core/                     # Core formatting & document processing
+├── ui/                       # Chainlit web UI
+├── service/                  # Business logic layer
+├── tests/                    # Unit & integration tests
+├── specs/                    # YAML templates (default, academic, gov, contract)
+├── docs/                     # Documentation
+├── .git/                     # Git repository
+├── config.py                 # Configuration from environment variables
+├── format_docx.py            # CLI entry point
+├── chainlit.md               # Chainlit UI markdown
+├── pyproject.toml            # Python project metadata
+├── requirements.txt          # Dependencies
+├── CHANGELOG.md              # Version history
+└── README.md                 # Project documentation
 ```
