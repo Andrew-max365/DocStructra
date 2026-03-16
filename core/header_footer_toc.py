@@ -114,6 +114,42 @@ def _build_rPr_element(
     return rPr
 
 
+def _add_paragraph_bottom_border(
+    paragraph,
+    color: str = "000000",
+    size: int = 6,
+    space: int = 1,
+) -> None:
+    """Add a bottom border line to a paragraph (used to create the header underline)."""
+    pPr = paragraph._p.get_or_add_pPr()
+    existing = pPr.find(qn("w:pBdr"))
+    if existing is not None:
+        pPr.remove(existing)
+    pBdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), str(size))
+    bottom.set(qn("w:space"), str(space))
+    bottom.set(qn("w:color"), color)
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+
+
+def _remove_paragraph_bottom_border(paragraph) -> None:
+    """Remove any bottom border line from a paragraph."""
+    pPr = paragraph._p.find(qn("w:pPr"))
+    if pPr is None:
+        return
+    pBdr = pPr.find(qn("w:pBdr"))
+    if pBdr is None:
+        return
+    bottom = pBdr.find(qn("w:bottom"))
+    if bottom is not None:
+        pBdr.remove(bottom)
+    if len(pBdr) == 0:
+        pPr.remove(pBdr)
+
+
 # 页码格式 fmt 到 Word 域开关的映射
 _FMT_SWITCHES = {
     "arabic": "",
@@ -165,6 +201,7 @@ def set_header(
     alignment: str = "center",
     color_hex: Optional[str] = None,
     section_index: int = 0,
+    add_border: bool = True,
 ) -> None:
     """
     设置文档指定节的页眉文本及格式。
@@ -179,6 +216,7 @@ def set_header(
     :param alignment:     对齐方式 center/left/right
     :param color_hex:     字体颜色（十六进制，如 "FF0000"）
     :param section_index: 节序号（默认 0，即第一节）
+    :param add_border:    是否在页眉下方添加横线（默认 True）
     """
     sections = doc.sections
     if section_index >= len(sections):
@@ -198,6 +236,11 @@ def set_header(
     para.alignment = _resolve_alignment(alignment)
     run = para.add_run(text)
     _apply_run_format(run, font_name_zh, font_name_en, font_size_pt, bold, italic, color_hex)
+
+    if add_border:
+        _add_paragraph_bottom_border(para)
+    else:
+        _remove_paragraph_bottom_border(para)
 
 
 def set_footer(
@@ -233,6 +276,22 @@ def set_footer(
     para.alignment = _resolve_alignment(alignment)
     run = para.add_run(text)
     _apply_run_format(run, font_name_zh, font_name_en, font_size_pt, bold, italic, color_hex)
+
+
+def remove_header_border(doc: Document, *, section_index: int = 0) -> None:
+    """
+    删除文档指定节页眉段落的底部横线（下边框）。
+
+    :param doc:           python-docx Document 对象
+    :param section_index: 节序号（默认 0，即第一节）
+    """
+    sections = doc.sections
+    if section_index >= len(sections):
+        section_index = 0
+    sec = sections[section_index]
+    header = sec.header
+    for para in header.paragraphs:
+        _remove_paragraph_bottom_border(para)
 
 
 def add_page_numbers(
@@ -552,6 +611,12 @@ def parse_header_footer_command(text: str) -> dict:
         if m:
             result["footer"] = {"text": m.group(1).strip()}
             break
+
+    # ── 页眉横线（删除/保留）────────────────────────────────────────────────
+    if re.search(r"页眉", text) and re.search(
+        r"删除|去掉|移除|取消|不要|去除", text
+    ) and re.search(r"横线|分割线|下划线|线条|线框|border", text, re.IGNORECASE):
+        result["header_remove_border"] = True
 
     # ── 页码 ─────────────────────────────────────────────────────────────────
     if re.search(r"页码", text):
