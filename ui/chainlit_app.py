@@ -711,23 +711,33 @@ async def _apply_review_flow(base_bytes: bytes, review_content: str, filename: s
     # 步骤 1：始终执行文档排版一致性审阅
     await _handle_audit(base_bytes)
 
-    # 步骤 2：若附带了增量排版要求，解析并只应用指定修改（不立即下载）
+    # 步骤 2：若附带了增量排版要求，使用 /f 的解析逻辑（parse_formatting_request）
+    # 这样可以复用 /f 的强大格式理解能力，只需维护一套排版逻辑
     _changes_applied = False
     if review_content:
         try:
-            from agent.intent_parser import parse_review_request
-            review_parsed = await parse_review_request(review_content)
-            has_requirements = review_parsed.get("has_requirements", False)
-            incremental_overrides = review_parsed.get("overrides", {})
-            incremental_hft = review_parsed.get("hft_actions", {})
+            from agent.intent_parser import parse_formatting_request
+            current_spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
+            # 使用与 /f 相同的解析逻辑，获得完整的格式理解能力
+            parsed = await parse_formatting_request(review_content, current_spec_path=current_spec_path)
+            incremental_overrides = parsed.get("overrides", {})
+            incremental_hft = parsed.get("hft_actions", {})
+            routed_spec = parsed.get("spec_path", current_spec_path)
         except Exception as e:
-            has_requirements = False
             incremental_overrides = {}
             incremental_hft = {}
+            routed_spec = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
             print(f"解析审阅增量意图异常: {e}")
 
+        has_requirements = bool(incremental_overrides or incremental_hft)
         if has_requirements:
             if incremental_overrides:
+                # 更新会话中的 spec 配置
+                current_overrides = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
+                new_overrides = _deep_merge_dicts(copy.deepcopy(current_overrides), incremental_overrides)
+                cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
+                cl.user_session.set(_KEY_SPEC_PATH, routed_spec)
+
                 await _handle_partial_format(base_bytes, review_content, filename, _skip_download=True)
                 _changes_applied = True
             if incremental_hft:
@@ -1219,6 +1229,7 @@ async def _handle_chat(text: str) -> None:
                     "📄 请先上传一个 `.docx` 文件，然后再使用审阅指令。\n\n"
                     "💡 上传文档后：\n"
                     "- `/r` — 审阅文档，列出排版问题\n"
+                    "- `/r 把标题改为黑色` — 审阅 + 只做指定的格式修改\n"
                     "- `/r 把正文行距改为1.5倍` — 审阅 + 只做指定的增量修改"
                 )
             ).send()
