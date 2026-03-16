@@ -708,6 +708,10 @@ async def _apply_review_flow(base_bytes: bytes, review_content: str, filename: s
     :param review_content: /r 命令后的增量要求（可为空字符串，表示纯审阅）
     :param filename: 文件名（用于下载链接）
     """
+    import io as _rev_io
+    from docx import Document as _RevDocument
+    from core.partial_formatter import apply_partial_format as _apply_partial_format
+
     # 步骤 1：始终执行文档排版一致性审阅
     await _handle_audit(base_bytes)
 
@@ -738,8 +742,39 @@ async def _apply_review_flow(base_bytes: bytes, review_content: str, filename: s
                 cl.user_session.set(_KEY_SPEC_OVERRIDES, new_overrides)
                 cl.user_session.set(_KEY_SPEC_PATH, routed_spec)
 
-                await _handle_partial_format(base_bytes, review_content, filename, _skip_download=True)
-                _changes_applied = True
+                # 直接应用已由 parse_formatting_request 解析好的 overrides，
+                # 复用 /f 的强大格式理解能力，不再重复解析
+                inc_thinking = cl.Message(content="⏳ 正在应用增量格式修改...")
+                await inc_thinking.send()
+                try:
+                    _doc = _RevDocument(_rev_io.BytesIO(base_bytes))
+                    _inc_report = _apply_partial_format(_doc, incremental_overrides)
+                    _out_buf = _rev_io.BytesIO()
+                    _doc.save(_out_buf)
+                    _out_bytes = _out_buf.getvalue()
+                    cl.user_session.set(_KEY_OUTPUT_BYTES, _out_bytes)
+
+                    _counts = _inc_report.get("counts", {})
+                    _counts_str = "、".join(
+                        f"{v} 个{k}段落" for k, v in _counts.items() if k != "page_sections"
+                    )
+                    _page_str = (
+                        f"，调整了 {_counts.get('page_sections', 0)} 个页面节"
+                        if _counts.get("page_sections") else ""
+                    )
+                    inc_thinking.content = (
+                        f"✅ **增量排版完成！**\n\n"
+                        f"📝 修改内容：{review_content}\n"
+                        f"📊 影响范围：{_counts_str or '无段落变更'}{_page_str}\n\n"
+                        "📥 其他格式保持不变。"
+                    )
+                    await inc_thinking.update()
+                    _changes_applied = True
+                except Exception as _inc_e:
+                    print(f"增量排版处理出错: {_inc_e}")
+                    inc_thinking.content = "❌ 增量排版处理出错，请重试或联系管理员。"
+                    await inc_thinking.update()
+
             if incremental_hft:
                 current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or base_bytes
                 await _handle_header_footer_toc(
@@ -1217,26 +1252,16 @@ async def _handle_chat(text: str) -> None:
     # 分支 B：审阅指令（以 /r 或 /review 开头）
     # ════════════════════════════════════════════════════════════════════════
     if _is_review_command(text):
-        review_content = _extract_review_content(text)
-
-        base_bytes = (
-            cl.user_session.get(_KEY_OUTPUT_BYTES)
-            or cl.user_session.get(_KEY_INPUT_BYTES)
-        )
-        if not base_bytes:
-            await cl.Message(
-                content=(
-                    "📄 请先上传一个 `.docx` 文件，然后再使用审阅指令。\n\n"
-                    "💡 上传文档后：\n"
-                    "- `/r` — 审阅文档，列出排版问题\n"
-                    "- `/r 把标题改为黑色` — 审阅 + 只做指定的格式修改\n"
-                    "- `/r 把正文行距改为1.5倍` — 审阅 + 只做指定的增量修改"
-                )
-            ).send()
-            return
-
-        filename = cl.user_session.get(_KEY_FILENAME, "document.docx")
-        await _apply_review_flow(base_bytes, review_content, filename)
+        # /r 要求同时上传文件才能执行，不允许使用会话中的历史文件
+        await cl.Message(
+            content=(
+                "📄 `/r` 审阅指令需要**同时上传 `.docx` 文件**才能执行。\n\n"
+                "💡 请在上传文档的同时发送审阅指令，例如：\n"
+                "- `/r` — 上传文档并审阅排版问题\n"
+                "- `/r 把标题改为黑色` — 上传文档，审阅 + 只做指定的格式修改\n"
+                "- `/r 把正文行距改为1.5倍` — 上传文档，审阅 + 只做指定的增量修改"
+            )
+        ).send()
         return
 
     # ════════════════════════════════════════════════════════════════════════
