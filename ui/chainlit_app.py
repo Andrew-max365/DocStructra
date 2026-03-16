@@ -113,10 +113,14 @@ async def on_chat_start():
 
 @cl.action_callback("accept_all_action")
 async def on_accept_all(action: cl.Action):
+    if cl.user_session.get(_KEY_STATE) != "awaiting_feedback":
+        return
     await _execute_feedback("accept_all", [])
 
 @cl.action_callback("reject_all_action")
 async def on_reject_all(action: cl.Action):
+    if cl.user_session.get(_KEY_STATE) != "awaiting_feedback":
+        return
     await _execute_feedback("reject_all", [])
 
 
@@ -188,7 +192,7 @@ async def on_message(message: cl.Message):
                     else:
                         await thinking_msg.remove()
 
-                    await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None, spec_path=spec_path)
+                    await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None, spec_path=spec_path, _hft_pending=bool(hft_actions))
 
                     # 如果有 HFT 需求（页眉/页脚/页码/目录），在格式化完成后继续处理
                     if hft_actions:
@@ -196,6 +200,11 @@ async def on_message(message: cl.Message):
                         await _handle_header_footer_toc(
                             current_bytes, cmd_content, docx_file.name, pre_parsed_cmd=hft_actions
                         )
+                        # 如果没有待处理的校对建议（未进入 awaiting_feedback），立即提供下载
+                        if cl.user_session.get(_KEY_STATE) != "awaiting_feedback":
+                            out_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES)
+                            report = cl.user_session.get(_KEY_REPORT, {})
+                            await _provide_download(out_bytes, report, docx_file.name, applied=0)
                 else:
                     # /f 但没有内容 → 直接用已有偏好处理
                     await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None, spec_path=spec_path)
@@ -211,7 +220,7 @@ async def on_message(message: cl.Message):
             # 将文字发给聊天，文档做标准处理
             await _handle_chat(text)
 
-        await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None, spec_path=spec_path)
+        await _process_file(input_bytes, docx_file.name, max_iters, overrides=overrides if overrides else None, spec_path=spec_path, _hft_pending=bool(cl.user_session.get(_KEY_HFT_ACTIONS, {})))
 
         # 若有之前暂存的 HFT 操作（无文档时通过 /f 记录），应用后清空
         saved_hft = cl.user_session.get(_KEY_HFT_ACTIONS, {})
@@ -219,6 +228,11 @@ async def on_message(message: cl.Message):
             current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or input_bytes
             await _handle_header_footer_toc(current_bytes, "", docx_file.name, pre_parsed_cmd=saved_hft)  # no extra user_text needed
             cl.user_session.set(_KEY_HFT_ACTIONS, {})
+            # 如果没有待处理的校对建议，提供下载
+            if cl.user_session.get(_KEY_STATE) != "awaiting_feedback":
+                out_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES)
+                report = cl.user_session.get(_KEY_REPORT, {})
+                await _provide_download(out_bytes, report, docx_file.name, applied=0)
         return
 
     # ── General chat fallback ────────────────────────────────────────────────
@@ -238,8 +252,14 @@ async def _process_file(
         max_iters: int,
         overrides: dict = None,
         spec_path: str = "specs/default.yaml",
+        _hft_pending: bool = False,
 ) -> None:
-    """Run the formatting pipeline and display results."""
+    """Run the formatting pipeline and display results.
+
+    :param _hft_pending: When True, skip the immediate _provide_download call when no
+                         diff cards are shown, so the caller can apply HFT changes first
+                         and then provide a single final download.
+    """
 
     processing_msg = cl.Message(content=f"🚀 任务已启动：正在全自动处理文档...")
     await processing_msg.send()
@@ -283,7 +303,7 @@ async def _process_file(
         if diff_items:
             await _show_diff_cards(diff_items)
             cl.user_session.set(_KEY_STATE, "awaiting_feedback")
-        else:
+        elif not _hft_pending:
             # 没有任何错别字，直接出锅！
             await _provide_download(out_bytes, report, filename, applied=0)
     except Exception as e:
@@ -651,45 +671,107 @@ async def _handle_audit(doc_bytes: bytes) -> None:
         await thinking_msg.update()
 
 
+async def _run_review_proofread(doc_bytes: bytes, filename: str) -> bool:
+    """Run LLM proofreading on a document and show diff cards if issues are found.
+
+    Returns True if diff cards were displayed (state set to 'awaiting_feedback'),
+    or False if no issues were found / LLM is unavailable.
+    """
+    import io
+    from core.parser import parse_docx_to_blocks
+    from agent.llm_client import LLMClient, LLMCallError
+
+    thinking_msg = cl.Message(content="🤖 正在进行 LLM 智能校对，检测错别字和标点问题...")
+    await thinking_msg.send()
+
+    try:
+        _, blocks = parse_docx_to_blocks(io.BytesIO(doc_bytes))
+        paragraphs = [b.text for b in blocks]
+
+        client = LLMClient()
+        proofread_result = await asyncio.to_thread(client.call_proofread, paragraphs)
+        raw_issues = [issue.model_dump() for issue in proofread_result.issues]
+        diff_items = build_diff_items(raw_issues)
+
+        if diff_items:
+            await thinking_msg.remove()
+            cl.user_session.set(_KEY_OUTPUT_BYTES, doc_bytes)
+            cl.user_session.set(_KEY_REPORT, {
+                "meta": {
+                    "paragraphs_before": len(paragraphs),
+                    "paragraphs_after": len(paragraphs),
+                }
+            })
+            cl.user_session.set(_KEY_FILENAME, filename)
+            cl.user_session.set(_KEY_ISSUES, raw_issues)
+            cl.user_session.set(_KEY_DIFF_ITEMS, diff_items)
+            await _show_diff_cards(diff_items)
+            cl.user_session.set(_KEY_STATE, "awaiting_feedback")
+            return True
+        else:
+            thinking_msg.content = "✅ LLM 校对完成，未发现明显文本错误。"
+            await thinking_msg.update()
+            return False
+    except LLMCallError as e:
+        thinking_msg.content = f"⚠️ LLM 校对暂不可用：{e}"
+        await thinking_msg.update()
+        return False
+    except Exception as e:
+        thinking_msg.content = f"⚠️ LLM 校对出错：{e}"
+        await thinking_msg.update()
+        return False
+
+
 async def _apply_review_flow(base_bytes: bytes, review_content: str, filename: str) -> None:
-    """审阅流程公共入口：先审阅文档，若附带增量要求则只修改指定内容。
+    """审阅流程公共入口：先审阅文档，若附带增量要求则只修改指定内容，最后进行 LLM 智能校对。
 
     :param base_bytes: 要审阅/修改的文档字节
     :param review_content: /r 命令后的增量要求（可为空字符串，表示纯审阅）
     :param filename: 文件名（用于下载链接）
     """
-    # 步骤 1：始终执行文档审阅
+    # 步骤 1：始终执行文档排版一致性审阅
     await _handle_audit(base_bytes)
 
-    # 步骤 2：若附带了增量排版要求，解析并只应用指定修改
-    if not review_content:
-        return
+    # 步骤 2：若附带了增量排版要求，解析并只应用指定修改（不立即下载）
+    _changes_applied = False
+    if review_content:
+        try:
+            from agent.intent_parser import parse_review_request
+            review_parsed = await parse_review_request(review_content)
+            has_requirements = review_parsed.get("has_requirements", False)
+            incremental_overrides = review_parsed.get("overrides", {})
+            incremental_hft = review_parsed.get("hft_actions", {})
+        except Exception as e:
+            has_requirements = False
+            incremental_overrides = {}
+            incremental_hft = {}
+            print(f"解析审阅增量意图异常: {e}")
 
-    try:
-        from agent.intent_parser import parse_review_request
-        review_parsed = await parse_review_request(review_content)
-        has_requirements = review_parsed.get("has_requirements", False)
-        incremental_overrides = review_parsed.get("overrides", {})
-        incremental_hft = review_parsed.get("hft_actions", {})
-    except Exception as e:
-        has_requirements = False
-        incremental_overrides = {}
-        incremental_hft = {}
-        print(f"解析审阅增量意图异常: {e}")
+        if has_requirements:
+            if incremental_overrides:
+                await _handle_partial_format(base_bytes, review_content, filename, _skip_download=True)
+                _changes_applied = True
+            if incremental_hft:
+                current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or base_bytes
+                await _handle_header_footer_toc(
+                    current_bytes, review_content, filename, pre_parsed_cmd=incremental_hft
+                )
+                _changes_applied = True
 
-    if not has_requirements:
-        return
-
-    # 应用增量 spec 修改（只改用户指定的字段）
-    if incremental_overrides:
-        await _handle_partial_format(base_bytes, review_content, filename)
-
-    # 应用增量 HFT 操作（页眉/页脚/页码/目录）
-    if incremental_hft:
+    # 步骤 3：LLM 智能校对（与 /f 流程一致，输出 diff 卡片供用户选择）
+    if LLM_API_KEY:
         current_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES) or base_bytes
-        await _handle_header_footer_toc(
-            current_bytes, review_content, filename, pre_parsed_cmd=incremental_hft
-        )
+        proofread_shown = await _run_review_proofread(current_bytes, filename)
+        if not proofread_shown and _changes_applied:
+            # 无校对建议时，若有增量修改则提供下载
+            out_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES)
+            report = cl.user_session.get(_KEY_REPORT, {})
+            await _provide_download(out_bytes, report, filename, applied=0)
+    elif _changes_applied:
+        # 未配置 LLM：若有增量修改则直接下载
+        out_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES)
+        report = cl.user_session.get(_KEY_REPORT, {})
+        await _provide_download(out_bytes, report, filename, applied=0)
 
 
 def _safe_float(value, default: float) -> float:
@@ -725,7 +807,7 @@ async def _handle_header_footer_toc(
     from docx import Document as _Document
     from core.header_footer_toc import (
         set_header, set_footer, add_page_numbers, insert_toc,
-        parse_header_footer_command,
+        parse_header_footer_command, remove_header_border,
     )
 
     thinking_msg = cl.Message(content="⏳ 正在处理页眉/页脚/页码/目录...")
@@ -850,12 +932,17 @@ async def _handle_header_footer_toc(
                 "⚠️ 目录内容需在 Microsoft Word 中按 **F9** 或「更新域」刷新显示。"
             )
 
+        # 删除页眉横线
+        if parsed_cmd.get("header_remove_border"):
+            remove_header_border(doc)
+            actions_done.append("✅ 已删除页眉横线")
+
         if not actions_done:
-            thinking_msg.content = "❓ 未识别到有效的操作指令，请重新描述。"
+            thinking_msg.content = "❌ 抱歉，未能从您的指令中提取出有效的排版属性，请换种说法重试。"
             await thinking_msg.update()
             return
 
-        # 保存并提供下载
+        # 保存修改后的文档到会话（供后续下载或校对使用）
         out_buf = io.BytesIO()
         doc.save(out_buf)
         out_bytes = out_buf.getvalue()
@@ -864,21 +951,16 @@ async def _handle_header_footer_toc(
         thinking_msg.content = "\n".join(actions_done)
         await thinking_msg.update()
 
-        base_name = os.path.splitext(os.path.basename(filename))[0]
-        out_el = cl.File(
-            name=f"{base_name}_header_footer.docx",
-            content=out_bytes,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        )
-        await cl.Message(content="📥 下载修改后的文档：", elements=[out_el]).send()
-
     except Exception as e:
         thinking_msg.content = f"❌ 处理页眉/页脚/页码/目录时出错：{e}"
         await thinking_msg.update()
 
 
-async def _handle_partial_format(doc_bytes: bytes, user_text: str, filename: str) -> None:
-    """Feature 2：局部/定向排版——只应用用户指定的特定格式属性。"""
+async def _handle_partial_format(doc_bytes: bytes, user_text: str, filename: str, _skip_download: bool = False) -> None:
+    """Feature 2：局部/定向排版——只应用用户指定的特定格式属性。
+
+    :param _skip_download: 若为 True，则不输出下载链接（由调用方统一提供）。
+    """
     import io
     from docx import Document as _Document
     from agent.intent_parser import parse_partial_format_request
@@ -926,13 +1008,14 @@ async def _handle_partial_format(doc_bytes: bytes, user_text: str, filename: str
         )
         await thinking_msg.update()
 
-        base_name = os.path.splitext(os.path.basename(filename))[0]
-        out_el = cl.File(
-            name=f"{base_name}_partial.docx",
-            content=out_bytes,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        )
-        await cl.Message(content="📥 下载修改后的文档：", elements=[out_el]).send()
+        if not _skip_download:
+            base_name = os.path.splitext(os.path.basename(filename))[0]
+            out_el = cl.File(
+                name=f"{base_name}_partial.docx",
+                content=out_bytes,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+            await cl.Message(content="📥 下载修改后的文档：", elements=[out_el]).send()
 
     except Exception as e:
         thinking_msg.content = f"❌ 局部排版处理出错：{e}"
@@ -1130,6 +1213,7 @@ async def _handle_chat(text: str) -> None:
                 base_bytes, filename, max_iters,
                 overrides=new_overrides,
                 spec_path=routed_spec,
+                _hft_pending=has_hft_changes,
             )
 
         # ── 应用 HFT 操作（如页眉、页脚、页码、目录等）──────────────────────
@@ -1139,6 +1223,11 @@ async def _handle_chat(text: str) -> None:
             await _handle_header_footer_toc(
                 current_bytes, cmd_content, filename, pre_parsed_cmd=hft_actions
             )
+            # 如果没有待处理的校对建议，提供下载
+            if cl.user_session.get(_KEY_STATE) != "awaiting_feedback":
+                out_bytes = cl.user_session.get(_KEY_OUTPUT_BYTES)
+                report = cl.user_session.get(_KEY_REPORT, {})
+                await _provide_download(out_bytes, report, filename, applied=0)
 
         return
 
