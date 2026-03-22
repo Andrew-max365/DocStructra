@@ -145,7 +145,7 @@ def validate_awdp_markdown(markdown_text: str) -> AWDPMarkdown:
         if is_table_line:
             if not in_table:
                 next_line = _next_line(body_lines, i)
-                if not _RE_TABLE_SEPARATOR.match(next_line):
+                if not next_line or not _RE_TABLE_SEPARATOR.match(next_line):
                     errors.append(f"第 {line_no} 行表格不是标准 Markdown 表格（缺少分隔行）")
                 in_table = True
             prev_plain_paragraph = False
@@ -211,7 +211,7 @@ def render_awdp_markdown_to_docx_bytes(markdown_text: str) -> bytes:
             continue
 
         next_line = _next_line(body_lines, i)
-        if "|" in stripped and i + 1 < len(body_lines) and _RE_TABLE_SEPARATOR.match(next_line):
+        if "|" in stripped and next_line and _RE_TABLE_SEPARATOR.match(next_line):
             table_lines = [body_lines[i], body_lines[i + 1]]
             i += 2
             while i < len(body_lines):

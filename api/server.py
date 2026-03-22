@@ -24,7 +24,7 @@ from core.awdp import (
 )
 
 logger = logging.getLogger(__name__)
-_RE_SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_-]+\.docx$")
+_RE_SAFE_FILENAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # 生产环境 fail-fast：REQUIRE_AUTH=true 时若 SERVER_API_KEY 未设置则拒绝启动
 if REQUIRE_AUTH and not SERVER_API_KEY:
