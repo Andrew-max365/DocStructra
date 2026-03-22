@@ -82,6 +82,9 @@ async def on_chat_start():
             "🔍 **审阅指令** `/r`：使用 `/r` 或 `/review` 开头，审阅文档排版问题；附带要求时只做增量修改，例如：\n"
             "> `/r` — 仅审阅，列出排版问题\n"
             "> `/r 把正文行距改为 1.5 倍` — 审阅 + 只改行距，不动其他格式\n\n"
+            "🧩 **AWDP 文本转 Word**：\n"
+            "> `/awdp_prompt` — 先获取标准 Prompt（发给任意 AI 生成 AWDP Markdown）\n"
+            "> `/awdp + AWDP Markdown全文` — 直接将合规文本渲染为 `.docx`\n\n"
             "💬 **自由聊天**：直接发送消息（不加前缀）与我对话。"
         )
     ).send()
@@ -592,6 +595,28 @@ def _extract_review_content(text: str) -> str:
         return t[len("/review "):].strip()
     if t.startswith("/r "):
         return t[len("/r "):].strip()
+    return ""
+
+
+def _is_awdp_prompt_command(text: str) -> bool:
+    """判断输入是否为 AWDP Prompt 指令。"""
+    t = text.strip()
+    return t == "/awdp_prompt"
+
+
+def _is_awdp_render_command(text: str) -> bool:
+    """判断输入是否为 AWDP 渲染指令（以 /awdp 或 /awdp_render 开头）。"""
+    t = text.strip()
+    return t.startswith("/awdp ") or t.startswith("/awdp_render ")
+
+
+def _extract_awdp_content(text: str) -> str:
+    """从 AWDP 渲染指令中提取 markdown 正文。"""
+    t = text.strip()
+    if t.startswith("/awdp_render "):
+        return t[len("/awdp_render "):].strip()
+    if t.startswith("/awdp "):
+        return t[len("/awdp "):].strip()
     return ""
 
 
@@ -1119,13 +1144,88 @@ async def _handle_locate_format(doc_bytes: bytes, user_text: str, filename: str)
         await thinking_msg.update()
 
 
+async def _handle_awdp_prompt() -> None:
+    """输出 AWDP-1.0 标准 Prompt 模板。"""
+    from core.awdp import get_awdp_prompt_template
+
+    prompt = get_awdp_prompt_template()
+    await cl.Message(
+        content=(
+            "📋 **AWDP-1.0 Prompt 模板**（请复制后发给你正在使用的 AI）：\n\n"
+            f"```text\n{prompt}\n```"
+        )
+    ).send()
+
+
+async def _handle_awdp_render(markdown_text: str) -> None:
+    """将 AWDP Markdown 直接渲染为 docx 下载文件。"""
+    from core.awdp import AWDPValidationError, render_awdp_markdown_to_docx_bytes
+
+    thinking_msg = cl.Message(content="⏳ 正在校验 AWDP 文本并生成 Word 文档...")
+    await thinking_msg.send()
+
+    try:
+        out_bytes = render_awdp_markdown_to_docx_bytes(markdown_text)
+    except AWDPValidationError as e:
+        errs = "\n".join(f"- {x}" for x in e.errors)
+        thinking_msg.content = (
+            "❌ AWDP 校验未通过，请按协议修正后重试：\n\n"
+            f"{errs}\n\n"
+            "💡 可先输入 `/awdp_prompt` 获取标准提示词。"
+        )
+        await thinking_msg.update()
+        return
+    except Exception as e:
+        thinking_msg.content = f"❌ AWDP 渲染失败：{e}"
+        await thinking_msg.update()
+        return
+
+    cl.user_session.set(_KEY_OUTPUT_BYTES, out_bytes)
+    cl.user_session.set(_KEY_FILENAME, "awdp_output.docx")
+    thinking_msg.content = "✅ AWDP 文本已转换为 Word 文档。"
+    await thinking_msg.update()
+
+    out_el = cl.File(
+        name="awdp_output.docx",
+        content=out_bytes,
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    await cl.Message(content="📥 下载生成结果：", elements=[out_el]).send()
+
+
 async def _handle_chat(text: str) -> None:
     """处理用户输入：通过指令前缀分发到各个处理分支。
 
     - 以 /f 或 /format 开头 → 排版指令（LLM 识别全部排版需求，包括页眉/页脚/目录等）
     - 以 /r 或 /review 开头 → 审阅指令（文档排版审阅 + 可选的增量排版）
+    - 以 /awdp_prompt 或 /awdp 开头 → AWDP 协议提示词与 Markdown 转 Word
     - 其他 → 普通聊天
     """
+    if _is_awdp_prompt_command(text):
+        await _handle_awdp_prompt()
+        return
+
+    if _is_awdp_render_command(text):
+        awdp_markdown = _extract_awdp_content(text)
+        if not awdp_markdown:
+            await cl.Message(
+                content=(
+                    "⚠️ 请在命令后粘贴完整 AWDP Markdown，例如：\n"
+                    "```text\n"
+                    "/awdp ---\n"
+                    "protocol: AWDP-1.0\n"
+                    "title: 示例\n"
+                    "---\n"
+                    "# 标题\n\n"
+                    "正文...\n"
+                    "```\n\n"
+                    "或先发送 `/awdp_prompt` 获取标准提示词。"
+                )
+            ).send()
+            return
+        await _handle_awdp_render(awdp_markdown)
+        return
+
     if not LLM_API_KEY:
         await cl.Message(
             content="💬 未配置 LLM API Key，暂无法进行对话或解析指令。"
@@ -1288,6 +1388,7 @@ async def _handle_chat(text: str) -> None:
                         "你可以帮助用户了解文档格式化知识、解答关于本工具的使用问题，也可以进行一般性的中文对话。"
                         "如果用户想对文档进行排版调整，请提醒他使用 `/f + 需求` 的命令格式。"
                         "如果用户想审阅文档排版问题或进行增量修改，请提醒他使用 `/r + 需求` 的命令格式。"
+                        "如果用户想把 AI 生成文本直接转成 Word，请提醒他先用 `/awdp_prompt`，再用 `/awdp + AWDP Markdown`。"
                     ),
                 },
                 *history[-_MAX_CHAT_HISTORY:],

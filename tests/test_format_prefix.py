@@ -29,12 +29,16 @@ with open(
 _GLOBS: dict = {}
 for node in ast.parse(_SRC).body:
     if isinstance(node, ast.FunctionDef) and node.name in (
-        "_is_format_command", "_extract_format_content"
+        "_is_format_command", "_extract_format_content", "_is_awdp_prompt_command",
+        "_is_awdp_render_command", "_extract_awdp_content"
     ):
         exec(compile(ast.Module(body=[node], type_ignores=[]), "<ast>", "exec"), _GLOBS)
 
 _is_format_command = _GLOBS["_is_format_command"]
 _extract_format_content = _GLOBS["_extract_format_content"]
+_is_awdp_prompt_command = _GLOBS["_is_awdp_prompt_command"]
+_is_awdp_render_command = _GLOBS["_is_awdp_render_command"]
+_extract_awdp_content = _GLOBS["_extract_awdp_content"]
 
 # Also extract the /r command helpers
 for node in ast.parse(_SRC).body:
@@ -128,3 +132,52 @@ def test_is_review_command_negative(text):
 ])
 def test_extract_review_content(text, expected):
     assert _extract_review_content(text) == expected
+
+
+# ── AWDP command helpers ────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text", [
+    "/awdp_prompt",
+    "  /awdp_prompt  ",
+])
+def test_is_awdp_prompt_command_positive(text):
+    assert _is_awdp_prompt_command(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "/awdp",
+    "/awdp ",
+    "/awdp_render something",
+    "awdp_prompt",
+    "",
+])
+def test_is_awdp_prompt_command_negative(text):
+    assert _is_awdp_prompt_command(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "/awdp ---\nprotocol: AWDP-1.0\n---\n# T",
+    "/awdp_render ---\nprotocol: AWDP-1.0\n---\n# T",
+])
+def test_is_awdp_render_command_positive(text):
+    assert _is_awdp_render_command(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "/awdp",
+    "/awdp_render",
+    "/awdp_prompt",
+    "awdp ---",
+    "",
+])
+def test_is_awdp_render_command_negative(text):
+    assert _is_awdp_render_command(text) is False
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("/awdp abc", "abc"),
+    ("/awdp_render xyz", "xyz"),
+    ("/awdp", ""),
+])
+def test_extract_awdp_content(text, expected):
+    assert _extract_awdp_content(text) == expected
