@@ -21,16 +21,6 @@ _RE_TABLE_SEPARATOR = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\
 _RE_ALLOWED_URL = re.compile(r"^https?://", re.IGNORECASE)
 _RE_FRONT_MATTER = re.compile(r"^---\n(.*?)\n---(?:\n|$)", re.DOTALL)
 
-# Inline formatting: order matters — bold+italic before bold, before italic
-_RE_INLINE_FMT = re.compile(
-    r"\*\*\*(.+?)\*\*\*"  # ***bold+italic***
-    r"|\*\*(.+?)\*\*"     # **bold**
-    r"|\*(.+?)\*"         # *italic*
-    r"|~~(.+?)~~"         # ~~strikethrough~~
-    r"|`(.+?)`"           # `inline code`
-    r"|\[([^\]]+)\]\([^\)]+\)",  # [link text](url) — keep visible text only
-)
-
 
 @dataclass
 class AWDPMarkdown:
@@ -62,8 +52,7 @@ def get_awdp_prompt_template() -> str:
 
 
 def parse_awdp_markdown(markdown_text: str) -> AWDPMarkdown:
-    # Normalize Windows/mixed line endings so patterns always see \n
-    text = (markdown_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = (markdown_text or "").strip()
     if not text.startswith("---\n"):
         raise AWDPValidationError(["缺少 YAML Front Matter（文档必须以 --- 开始）"])
 
@@ -103,6 +92,7 @@ def validate_awdp_markdown(markdown_text: str) -> AWDPMarkdown:
     in_code = False
     code_block_start_line = 0
     in_table = False
+    prev_plain_paragraph = False
     for i, raw_line in enumerate(body_lines):
         line_no = i + 1
         line = raw_line.rstrip("\n")
@@ -119,6 +109,7 @@ def validate_awdp_markdown(markdown_text: str) -> AWDPMarkdown:
             else:
                 in_code = False
                 code_block_start_line = 0
+            prev_plain_paragraph = False
             continue
 
         if in_code:
@@ -132,10 +123,12 @@ def validate_awdp_markdown(markdown_text: str) -> AWDPMarkdown:
             level = len(heading_match.group(1))
             if level > 3:
                 errors.append(f"第 {line_no} 行标题层级超过三级")
+            prev_plain_paragraph = False
             in_table = False
             continue
 
         if not stripped:
+            prev_plain_paragraph = False
             in_table = False
             continue
 
@@ -144,6 +137,7 @@ def validate_awdp_markdown(markdown_text: str) -> AWDPMarkdown:
                 caption = (m.group(3) or "").strip()
                 if not caption:
                     errors.append(f"第 {line_no} 行图片缺少标题（caption）")
+            prev_plain_paragraph = False
             in_table = False
             continue
 
@@ -154,8 +148,17 @@ def validate_awdp_markdown(markdown_text: str) -> AWDPMarkdown:
                 if not next_line or not _RE_TABLE_SEPARATOR.match(next_line):
                     errors.append(f"第 {line_no} 行表格不是标准 Markdown 表格（缺少分隔行）")
                 in_table = True
+            prev_plain_paragraph = False
             continue
         in_table = False
+
+        if _RE_ORDERED_LIST.match(stripped) or _RE_UNORDERED_LIST.match(stripped) or stripped.startswith(">"):
+            prev_plain_paragraph = False
+            continue
+
+        if prev_plain_paragraph:
+            errors.append(f"第 {line_no} 行与上一段之间缺少空行")
+        prev_plain_paragraph = True
 
     if in_code:
         errors.append(f"代码块未闭合（起始于第 {code_block_start_line} 行，缺少结束 ```）")
@@ -165,86 +168,22 @@ def validate_awdp_markdown(markdown_text: str) -> AWDPMarkdown:
     return parsed
 
 
-def _apply_inline_formatting(paragraph: Any, text: str) -> None:
-    """Add runs with bold/italic/code/strikethrough inline formatting to *paragraph*.
-
-    Supported patterns:
-      ***bold+italic*** | **bold** | *italic* | ~~strikethrough~~ | `code` | [link](url)
-    """
-    pos = 0
-    for m in _RE_INLINE_FMT.finditer(text):
-        if m.start() > pos:
-            paragraph.add_run(text[pos : m.start()])
-        if m.group(1):  # ***bold+italic***
-            run = paragraph.add_run(m.group(1))
-            run.bold = True
-            run.italic = True
-        elif m.group(2):  # **bold**
-            run = paragraph.add_run(m.group(2))
-            run.bold = True
-        elif m.group(3):  # *italic*
-            run = paragraph.add_run(m.group(3))
-            run.italic = True
-        elif m.group(4):  # ~~strikethrough~~
-            run = paragraph.add_run(m.group(4))
-            run.font.strike = True
-        elif m.group(5):  # `inline code`
-            run = paragraph.add_run(m.group(5))
-            run.font.name = "Courier New"
-        elif m.group(6):  # [link text](url) — render visible text only
-            paragraph.add_run(m.group(6))
-        pos = m.end()
-    if pos < len(text):
-        paragraph.add_run(text[pos:])
-
-
-def _flush_plain_paragraph(doc: Any, lines: list[str]) -> None:
-    """Flush accumulated consecutive plain-text lines as a single paragraph."""
-    if not lines:
-        return
-    text = " ".join(ln.strip() for ln in lines)
-    text = text.strip()
-    if text:
-        p = doc.add_paragraph()
-        _apply_inline_formatting(p, text)
-
-
 def render_awdp_markdown_to_docx_bytes(markdown_text: str) -> bytes:
-    """Validate and render AWDP-1.0 Markdown to a .docx byte string.
-
-    Supports:
-    - Headings (h1–h3)
-    - Multi-line paragraphs (consecutive lines are merged into one paragraph)
-    - Inline formatting: **bold**, *italic*, ***bold+italic***, ~~strike~~, `code`, [link](url)
-    - Ordered and unordered lists
-    - Block quotes
-    - Fenced code blocks with language label
-    - Tables (with grid style)
-    - Images (rendered as placeholder + caption)
-    """
     parsed = validate_awdp_markdown(markdown_text)
     doc = Document()
 
     body_lines = parsed.body.splitlines()
     i = 0
-    para_buf: list[str] = []  # accumulates consecutive plain-text lines
-
     while i < len(body_lines):
         raw_line = body_lines[i]
         stripped = raw_line.strip()
 
-        # Blank line: flush current paragraph buffer
         if not stripped:
-            _flush_plain_paragraph(doc, para_buf)
-            para_buf = []
             i += 1
             continue
 
-        # Fenced code block
         code_match = _RE_CODE_FENCE.match(stripped)
         if code_match:
-            _flush_plain_paragraph(doc, para_buf)
-            para_buf = []
             lang = code_match.group(1).strip()
             i += 1
             code_lines: list[str] = []
@@ -253,6 +192,7 @@ def render_awdp_markdown_to_docx_bytes(markdown_text: str) -> bytes:
                     break
                 code_lines.append(body_lines[i])
                 i += 1
+
             title = doc.add_paragraph()
             title.add_run(f"代码（{lang}）").bold = True
             code_para = doc.add_paragraph("\n".join(code_lines))
@@ -263,21 +203,15 @@ def render_awdp_markdown_to_docx_bytes(markdown_text: str) -> bytes:
             i += 1
             continue
 
-        # Heading
         heading_match = _RE_HEADING.match(stripped)
         if heading_match:
-            _flush_plain_paragraph(doc, para_buf)
-            para_buf = []
             level = min(len(heading_match.group(1)), 3)
             doc.add_heading(heading_match.group(2).strip(), level=level)
             i += 1
             continue
 
-        # Table (header row followed immediately by separator row)
         next_line = _next_line(body_lines, i)
         if "|" in stripped and next_line and _RE_TABLE_SEPARATOR.match(next_line):
-            _flush_plain_paragraph(doc, para_buf)
-            para_buf = []
             table_lines = [body_lines[i], body_lines[i + 1]]
             i += 2
             while i < len(body_lines):
@@ -286,28 +220,22 @@ def render_awdp_markdown_to_docx_bytes(markdown_text: str) -> bytes:
                     break
                 table_lines.append(body_lines[i])
                 i += 1
+
             rows = [_parse_table_row(x) for x in table_lines if "|" in x]
             if len(rows) >= 2:
                 header = rows[0]
                 data_rows = rows[2:] if len(rows) >= 3 else []
                 col_count = max(1, len(header))
                 table = doc.add_table(rows=1 + len(data_rows), cols=col_count)
-                try:
-                    table.style = "Table Grid"
-                except Exception:
-                    pass
-                for c, cell_text in enumerate(header[:col_count]):
-                    table.cell(0, c).text = cell_text
+                for c, cell in enumerate(header[:col_count]):
+                    table.cell(0, c).text = cell
                 for r, row_data in enumerate(data_rows, start=1):
                     for c in range(col_count):
                         table.cell(r, c).text = row_data[c] if c < len(row_data) else ""
             continue
 
-        # Image placeholder
         image_match = _RE_IMAGE.search(stripped)
         if image_match:
-            _flush_plain_paragraph(doc, para_buf)
-            para_buf = []
             alt = _sanitize_text(image_match.group(1))
             raw_url = (image_match.group(2) or "").strip()
             url = _sanitize_url(raw_url)
@@ -325,42 +253,23 @@ def render_awdp_markdown_to_docx_bytes(markdown_text: str) -> bytes:
             i += 1
             continue
 
-        # Ordered list item
         if _RE_ORDERED_LIST.match(stripped):
-            _flush_plain_paragraph(doc, para_buf)
-            para_buf = []
             content = _RE_ORDERED_LIST.sub("", stripped, count=1).strip()
-            p = doc.add_paragraph(style="List Number")
-            _apply_inline_formatting(p, content)
+            doc.add_paragraph(content, style="List Number")
             i += 1
             continue
-
-        # Unordered list item
         if _RE_UNORDERED_LIST.match(stripped):
-            _flush_plain_paragraph(doc, para_buf)
-            para_buf = []
             content = _RE_UNORDERED_LIST.sub("", stripped, count=1).strip()
-            p = doc.add_paragraph(style="List Bullet")
-            _apply_inline_formatting(p, content)
+            doc.add_paragraph(content, style="List Bullet")
             i += 1
             continue
-
-        # Block quote
         if stripped.startswith(">"):
-            _flush_plain_paragraph(doc, para_buf)
-            para_buf = []
-            p = doc.add_paragraph(style="Intense Quote")
-            _apply_inline_formatting(p, stripped.lstrip(">").strip())
+            doc.add_paragraph(stripped.lstrip(">").strip(), style="Intense Quote")
             i += 1
             continue
 
-        # Plain text — accumulate into paragraph buffer so consecutive lines
-        # belonging to the same paragraph are merged into one.
-        para_buf.append(raw_line)
+        doc.add_paragraph(stripped)
         i += 1
-
-    # Flush any remaining paragraph content
-    _flush_plain_paragraph(doc, para_buf)
 
     buf = io.BytesIO()
     doc.save(buf)
