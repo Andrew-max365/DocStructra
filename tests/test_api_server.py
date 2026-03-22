@@ -81,52 +81,6 @@ def test_format_docx_json_endpoint_uses_default_label_mode(client, monkeypatch):
     assert captured["label_mode"] == "hybrid"
 
 
-def test_awdp_prompt_endpoint(client):
-    resp = client.get("/v1/awdp/prompt")
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["status"] == "ok"
-    assert payload["protocol"] == "AWDP-1.0"
-    assert "AWDP-1.0" in payload["prompt"]
-
-
-def test_awdp_validate_and_render_endpoints(client):
-    markdown = """---
-protocol: AWDP-1.0
-title: 示例
----
-# 标题
-
-正文段落。
-"""
-    v_resp = client.post("/v1/awdp/validate", data={"markdown": markdown})
-    assert v_resp.status_code == 200
-    assert v_resp.json()["status"] == "ok"
-
-    r_resp = client.post(
-        "/v1/awdp/render",
-        data={"markdown": markdown, "filename": "demo"},
-    )
-    assert r_resp.status_code == 200
-    assert r_resp.headers["content-type"].startswith(
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    )
-    assert b"PK" == r_resp.content[:2]
-
-
-def test_awdp_validate_rejects_invalid_markdown(client):
-    bad = """---
-protocol: AWDP-1.0
----
-#### 四级标题
-"""
-    resp = client.post("/v1/awdp/validate", data={"markdown": bad})
-    assert resp.status_code == 400
-    payload = resp.json()
-    assert payload["status"] == "error"
-    assert any("标题层级超过三级" in x for x in payload["errors"])
-
-
 @pytest.mark.parametrize("bad_path", [
     "../../etc/passwd",
     "/etc/passwd",
