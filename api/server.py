@@ -5,7 +5,6 @@ import io
 import json
 import logging
 import os
-import re
 import secrets
 import zipfile
 from dataclasses import asdict
@@ -16,15 +15,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from agent.Structura_agent import run_doc_agent_bytes
 from config import REQUIRE_AUTH, SERVER_API_KEY
-from core.awdp import (
-    AWDPValidationError,
-    get_awdp_prompt_template,
-    render_awdp_markdown_to_docx_bytes,
-    validate_awdp_markdown,
-)
 
 logger = logging.getLogger(__name__)
-_RE_SAFE_FILENAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # 生产环境 fail-fast：REQUIRE_AUTH=true 时若 SERVER_API_KEY 未设置则拒绝启动
 if REQUIRE_AUTH and not SERVER_API_KEY:
@@ -58,47 +50,6 @@ def _validate_spec_path(spec_path: str) -> None:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
-
-
-@app.get("/v1/awdp/prompt", dependencies=[Depends(_verify_api_key)])
-def awdp_prompt_template() -> dict:
-    return {"status": "ok", "protocol": "AWDP-1.0", "prompt": get_awdp_prompt_template()}
-
-
-@app.post("/v1/awdp/validate", dependencies=[Depends(_verify_api_key)])
-async def awdp_validate(markdown: str = Form(..., description="待校验的 AWDP Markdown 文本")):
-    try:
-        validate_awdp_markdown(markdown)
-    except AWDPValidationError as e:
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "protocol": "AWDP-1.0", "errors": e.errors},
-        )
-    return {"status": "ok", "protocol": "AWDP-1.0"}
-
-
-@app.post("/v1/awdp/render", dependencies=[Depends(_verify_api_key)])
-async def awdp_render(
-    markdown: str = Form(..., description="符合 AWDP-1.0 的 Markdown 文本"),
-    filename: str = Form("awdp_output.docx"),
-):
-    try:
-        out_bytes = render_awdp_markdown_to_docx_bytes(markdown)
-    except AWDPValidationError as e:
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "protocol": "AWDP-1.0", "errors": e.errors},
-        )
-    safe_name = os.path.basename((filename or "").strip() or "awdp_output.docx")
-    if not safe_name.lower().endswith(".docx"):
-        safe_name += ".docx"
-    if not _RE_SAFE_FILENAME.match(safe_name):
-        safe_name = "awdp_output.docx"
-    return StreamingResponse(
-        io.BytesIO(out_bytes),
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
-    )
 
 
 @app.post("/v1/agent/format", dependencies=[Depends(_verify_api_key)])
