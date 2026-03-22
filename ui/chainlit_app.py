@@ -144,7 +144,7 @@ async def on_message(message: cl.Message):
             return
 
         base_name = os.path.splitext(os.path.basename(md_file.name))[0]
-        await _handle_awdp_format(markdown_text, output_filename=f"{base_name}.docx")
+        await _handle_awdp_render(markdown_text, output_filename=f"{base_name}.docx")
         return
 
     if md_file is not None and not docx_file:
@@ -1198,15 +1198,15 @@ async def _handle_awdp_prompt() -> None:
     ).send()
 
 
-async def _handle_awdp_format(markdown_text: str, *, output_filename: str = "awdp_output.docx") -> None:
-    """将 AWDP Markdown 校验并渲染为基础文档，再通过 Agent 排版流水线生成最终 Word 文档。"""
+async def _handle_awdp_render(markdown_text: str, *, output_filename: str = "awdp_output.docx") -> None:
+    """将 AWDP Markdown 直接渲染为 docx 下载文件。"""
     from core.awdp import AWDPValidationError, render_awdp_markdown_to_docx_bytes
 
-    thinking_msg = cl.Message(content="⏳ 正在校验 AWDP 文本...")
+    thinking_msg = cl.Message(content="⏳ 正在校验 AWDP 文本并生成 Word 文档...")
     await thinking_msg.send()
 
     try:
-        raw_bytes = render_awdp_markdown_to_docx_bytes(markdown_text)
+        out_bytes = render_awdp_markdown_to_docx_bytes(markdown_text)
     except AWDPValidationError as e:
         errs = "\n".join(f"- {x}" for x in e.errors)
         thinking_msg.content = (
@@ -1221,24 +1221,17 @@ async def _handle_awdp_format(markdown_text: str, *, output_filename: str = "awd
         await thinking_msg.update()
         return
 
-    await thinking_msg.remove()
-
-    # 将渲染出的基础文档传入 Agent 排版流水线，生成符合自定义规范的最终文档
-    max_iters = cl.user_session.get(_KEY_MAX_ITERS, REACT_MAX_ITERS)
-    overrides = cl.user_session.get(_KEY_SPEC_OVERRIDES, {})
-    spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
-
-    cl.user_session.set(_KEY_INPUT_BYTES, raw_bytes)
+    cl.user_session.set(_KEY_OUTPUT_BYTES, out_bytes)
     cl.user_session.set(_KEY_FILENAME, output_filename)
-    cl.user_session.set(_KEY_OUTPUT_BYTES, None)
+    thinking_msg.content = "✅ AWDP 文本已转换为 Word 文档。"
+    await thinking_msg.update()
 
-    await _process_file(
-        raw_bytes,
-        output_filename,
-        max_iters,
-        overrides=overrides if overrides else None,
-        spec_path=spec_path,
+    out_el = cl.File(
+        name=output_filename,
+        content=out_bytes,
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
+    await cl.Message(content="📥 下载生成结果：", elements=[out_el]).send()
 
 
 async def _handle_chat(text: str) -> None:
@@ -1272,7 +1265,7 @@ async def _handle_chat(text: str) -> None:
                 )
             ).send()
             return
-        await _handle_awdp_format(awdp_markdown)
+        await _handle_awdp_render(awdp_markdown)
         return
 
     if _is_awdp_file_command(text):
