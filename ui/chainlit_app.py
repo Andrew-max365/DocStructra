@@ -85,6 +85,8 @@ async def on_chat_start():
             "🧩 **AWDP 文本转 Word**：\n"
             "> `/awdp_prompt` — 先获取标准 Prompt（发给任意 AI 生成 AWDP Markdown）\n"
             "> `/awdp + AWDP Markdown全文` — 直接将合规文本渲染为 `.docx`\n\n"
+            "📎 **AWDP 文件转 Word**：\n"
+            "> 上传 `.md` 文件并发送 `/awdp_file` — 直接转换为 `.docx`（适合超长文本）\n\n"
             "💬 **自由聊天**：直接发送消息（不加前缀）与我对话。"
         )
     ).send()
@@ -110,16 +112,49 @@ async def on_message(message: cl.Message):
 
     # Allow uploading a new file even while awaiting feedback (starts fresh)
     docx_file = None
+    md_file = None
     for f in (message.elements or []):
-        if hasattr(f, "name") and f.name.lower().endswith(".docx"):
+        if not hasattr(f, "name"):
+            continue
+        _name = f.name.lower()
+        if _name.endswith(".docx") and docx_file is None:
             docx_file = f
-            break
+            continue
+        if _name.endswith(".md") and md_file is None:
+            md_file = f
+            continue
 
-    if state == "awaiting_feedback" and docx_file is None:
+    if state == "awaiting_feedback" and docx_file is None and md_file is None:
         await _handle_feedback(message)
         return
 
     text = message.content.strip()
+
+    # ── Markdown upload for /awdp_file ──────────────────────────────────────
+    if md_file is not None and _is_awdp_file_command(text):
+        with open(md_file.path, "rb") as fp:
+            md_bytes = fp.read()
+        try:
+            # 兼容 Windows 常见的 UTF-8 BOM 编码 .md 文件
+            markdown_text = md_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            await cl.Message(
+                content="❌ `.md` 文件编码不是 UTF-8，暂不支持。请保存为 UTF-8 后重试。"
+            ).send()
+            return
+
+        base_name = os.path.splitext(os.path.basename(md_file.name))[0]
+        await _handle_awdp_render(markdown_text, output_filename=f"{base_name}.docx")
+        return
+
+    if md_file is not None and not docx_file:
+        await cl.Message(
+            content=(
+                "📎 检测到您上传了 `.md` 文件。\n\n"
+                "请发送 `/awdp_file` 进行文件直转，或使用 `/awdp + Markdown全文` 直接粘贴文本转换。"
+            )
+        ).send()
+        return
 
     # ── File upload (text is optional) ──────────────────────────────────────
     if docx_file is not None:
@@ -608,6 +643,12 @@ def _is_awdp_render_command(text: str) -> bool:
     """判断输入是否为 AWDP 渲染指令（以 /awdp 或 /awdp_render 开头）。"""
     t = text.strip()
     return t.startswith("/awdp ") or t.startswith("/awdp_render ")
+
+
+def _is_awdp_file_command(text: str) -> bool:
+    """判断输入是否为 AWDP 文件渲染指令。"""
+    t = text.strip()
+    return t == "/awdp_file"
 
 
 def _extract_awdp_content(text: str) -> str:
@@ -1157,7 +1198,7 @@ async def _handle_awdp_prompt() -> None:
     ).send()
 
 
-async def _handle_awdp_render(markdown_text: str) -> None:
+async def _handle_awdp_render(markdown_text: str, *, output_filename: str = "awdp_output.docx") -> None:
     """将 AWDP Markdown 直接渲染为 docx 下载文件。"""
     from core.awdp import AWDPValidationError, render_awdp_markdown_to_docx_bytes
 
@@ -1181,12 +1222,12 @@ async def _handle_awdp_render(markdown_text: str) -> None:
         return
 
     cl.user_session.set(_KEY_OUTPUT_BYTES, out_bytes)
-    cl.user_session.set(_KEY_FILENAME, "awdp_output.docx")
+    cl.user_session.set(_KEY_FILENAME, output_filename)
     thinking_msg.content = "✅ AWDP 文本已转换为 Word 文档。"
     await thinking_msg.update()
 
     out_el = cl.File(
-        name="awdp_output.docx",
+        name=output_filename,
         content=out_bytes,
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
@@ -1199,6 +1240,7 @@ async def _handle_chat(text: str) -> None:
     - 以 /f 或 /format 开头 → 排版指令（LLM 识别全部排版需求，包括页眉/页脚/目录等）
     - 以 /r 或 /review 开头 → 审阅指令（文档排版审阅 + 可选的增量排版）
     - 以 /awdp_prompt 或 /awdp 开头 → AWDP 协议提示词与 Markdown 转 Word
+    - 以 /awdp_file 开头 → AWDP 文件上传直转（需同时上传 `.md`）
     - 其他 → 普通聊天
     """
     if _is_awdp_prompt_command(text):
@@ -1224,6 +1266,15 @@ async def _handle_chat(text: str) -> None:
             ).send()
             return
         await _handle_awdp_render(awdp_markdown)
+        return
+
+    if _is_awdp_file_command(text):
+        await cl.Message(
+            content=(
+                "📎 `/awdp_file` 需要**同时上传 `.md` 文件**才能执行。\n\n"
+                "示例：上传 `draft.md` 后发送 `/awdp_file`。"
+            )
+        ).send()
         return
 
     if not LLM_API_KEY:
@@ -1389,6 +1440,7 @@ async def _handle_chat(text: str) -> None:
                         "如果用户想对文档进行排版调整，请提醒他使用 `/f + 需求` 的命令格式。"
                         "如果用户想审阅文档排版问题或进行增量修改，请提醒他使用 `/r + 需求` 的命令格式。"
                         "如果用户想把 AI 生成文本直接转成 Word，请提醒他先用 `/awdp_prompt`，再用 `/awdp + AWDP Markdown`。"
+                        "如果用户上传了 `.md` 文件并想直接转换，请提醒他发送 `/awdp_file`。"
                     ),
                 },
                 *history[-_MAX_CHAT_HISTORY:],

@@ -30,7 +30,7 @@ _GLOBS: dict = {}
 for node in ast.parse(_SRC).body:
     if isinstance(node, ast.FunctionDef) and node.name in (
         "_is_format_command", "_extract_format_content", "_is_awdp_prompt_command",
-        "_is_awdp_render_command", "_extract_awdp_content"
+        "_is_awdp_render_command", "_is_awdp_file_command", "_extract_awdp_content"
     ):
         exec(compile(ast.Module(body=[node], type_ignores=[]), "<ast>", "exec"), _GLOBS)
 
@@ -38,6 +38,7 @@ _is_format_command = _GLOBS["_is_format_command"]
 _extract_format_content = _GLOBS["_extract_format_content"]
 _is_awdp_prompt_command = _GLOBS["_is_awdp_prompt_command"]
 _is_awdp_render_command = _GLOBS["_is_awdp_render_command"]
+_is_awdp_file_command = _GLOBS["_is_awdp_file_command"]
 _extract_awdp_content = _GLOBS["_extract_awdp_content"]
 
 # Also extract the /r command helpers
@@ -172,6 +173,25 @@ def test_is_awdp_render_command_positive(text):
 ])
 def test_is_awdp_render_command_negative(text):
     assert _is_awdp_render_command(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "/awdp_file",
+    "  /awdp_file  ",
+])
+def test_is_awdp_file_command_positive(text):
+    assert _is_awdp_file_command(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "/awdp_file now",
+    "/awdp",
+    "/awdp_prompt",
+    "awdp_file",
+    "",
+])
+def test_is_awdp_file_command_negative(text):
+    assert _is_awdp_file_command(text) is False
 
 
 @pytest.mark.parametrize("text, expected", [
