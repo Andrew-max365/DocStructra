@@ -107,6 +107,32 @@ curl -X POST "[http://127.0.0.1:8000/v1/agent/format/bundle](http://127.0.0.1:80
   -o structura_bundle.zip
 ```
 
+### AWDP-1.0 Markdown 中间层接口（新增）
+
+用于“先让任意 AI 生成结构化 Markdown，再由本 Agent 排版产出 Word”的流程：
+
+1) 获取标准 Prompt 模板（发给任意 AI）：
+```bash
+curl -X GET "http://127.0.0.1:8000/v1/awdp/prompt" \
+  -H "X-API-Key: your-strong-secret-key"
+```
+
+2) 校验 AI 产出的 AWDP Markdown：
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/awdp/validate" \
+  -H "X-API-Key: your-strong-secret-key" \
+  -F 'markdown=---\nprotocol: AWDP-1.0\n---\n# 标题\n\n正文。'
+```
+
+3) 渲染为 .docx：
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/awdp/render" \
+  -H "X-API-Key: your-strong-secret-key" \
+  -F 'markdown=---\nprotocol: AWDP-1.0\n---\n# 标题\n\n正文。' \
+  -F "filename=awdp_output.docx" \
+  -o awdp_output.docx
+```
+
 ---
 
 ## 📁 核心目录结构
