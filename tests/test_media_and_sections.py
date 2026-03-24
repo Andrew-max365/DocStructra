@@ -4,6 +4,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from core.parser import Block
 from core.spec import load_spec
 from core.formatter import apply_formatting
+from unittest.mock import patch
 
 
 def _mk_blocks(doc):
@@ -49,13 +50,11 @@ def test_caption_and_table_centering_actions_reported():
     labels["_source"] = "test"
     spec = load_spec("specs/default.yaml")
 
-    import core.formatter as fmt
-    orig = fmt._paragraph_has_inline_drawing
-    fmt._paragraph_has_inline_drawing = lambda p: (p.text or "").strip() == "图片占位段"
-    try:
+    with patch(
+        "core.formatter._paragraph_has_inline_drawing",
+        side_effect=lambda p: (p.text or "").strip() == "图片占位段",
+    ):
         report = apply_formatting(doc, blocks, labels, spec)
-    finally:
-        fmt._paragraph_has_inline_drawing = orig
 
     assert p_img.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.CENTER
     assert p_caption.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.CENTER

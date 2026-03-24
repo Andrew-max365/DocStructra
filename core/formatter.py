@@ -48,6 +48,8 @@ RE_REFERENCE = re.compile(r"^\s*(参考文献|references?|bibliography)\s*$", re
 RE_TOC_HEADING = re.compile(r"^\s*(目录|contents?)\s*$", re.IGNORECASE)
 RE_REQUIREMENT_HEADING = re.compile(r"^\s*(课程要求|作业要求|实验要求|考核要求)\s*[:：]?\s*$", re.IGNORECASE)
 ROLE_LABELS_FALLBACK_TO_RULE = {"blank", "unknown"}
+COVER_MAX_LENGTH = 20
+COVER_KEYWORDS = ("报告", "论文", "课程设计", "课程", "作业")
 
 # 正文层级列表标记（不是章节标题，而是段落内编号列表项）
 # 注意：RE_SUBTITLE_CN 已捕获 （一） 形式（中文括号数字），这里只捕获阿拉伯数字括号/括号后缀/圈数字/英文字母
@@ -180,8 +182,21 @@ def _detect_section_role(paragraphs: List[Paragraph], base_role_getter) -> Dict:
             return True
         if p._p.xpath(".//*[local-name()='instrText' and contains(., 'TOC')]"):
             return True
+        # 匹配目录行：标题后跟导引点（ASCII 点号 ..... 或中文省略号 ……）并以页码结尾
         # 例如：1 绪论........1
         return bool(re.search(r"(?:\.{2,}|…{2,}).*\d+\s*$", text))
+
+    def _is_likely_cover_paragraph(idx: int, base_role: str, text: str) -> bool:
+        """Heuristic for cover-title line: first paragraph, body-like role, short title text."""
+        if idx != 0:
+            return False
+        if base_role != "body":
+            return False
+        if not text:
+            return False
+        if len(text) > COVER_MAX_LENGTH:
+            return False
+        return any(k in text for k in COVER_KEYWORDS)
 
     for idx, p in enumerate(paragraphs):
         t = (p.text or "").strip()
@@ -190,7 +205,7 @@ def _detect_section_role(paragraphs: List[Paragraph], base_role_getter) -> Dict:
         if base_role == "cover":
             section_by_elem[p._p] = "cover"
             continue
-        if idx == 0 and base_role == "body" and t and len(t) <= 20 and any(k in t for k in ("报告", "论文", "课程设计", "课程", "作业")):
+        if _is_likely_cover_paragraph(idx, base_role, t):
             section_by_elem[p._p] = "cover"
             continue
 
