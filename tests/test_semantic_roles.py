@@ -128,3 +128,12 @@ def test_unknown_label_falls_back_to_semantic_detect_role():
 
     assert counts.get("abstract", 0) == 1
     assert counts.get("unknown_as_body", 0) == 0
+
+
+def test_detect_role_toc_and_requirement():
+    """detect_role should recognize TOC and requirement section headings."""
+    doc = Document()
+    p_toc = doc.add_paragraph("目录")
+    p_req = doc.add_paragraph("课程要求")
+    assert detect_role(p_toc) == "toc"
+    assert detect_role(p_req) == "requirement"

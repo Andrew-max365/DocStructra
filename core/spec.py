@@ -128,6 +128,24 @@ def _validate_and_fill_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
             "space_after_pt": 0,
             "alignment": "center",
         }),
+        ("toc", {
+            "font_size_pt": body_font_size,
+            "bold": False,
+            "italic": False,
+            "first_line_chars": 0,
+            "space_before_pt": 0,
+            "space_after_pt": 0,
+            "alignment": "left",
+        }),
+        ("requirement", {
+            "font_size_pt": body_font_size,
+            "bold": False,
+            "italic": False,
+            "first_line_chars": 2,
+            "space_before_pt": body_before,
+            "space_after_pt": body_after,
+            "alignment": "justify",
+        }),
     ):
         role_cfg = dict(cfg.get(role_key) or {})
         for k, v in role_defaults.items():
