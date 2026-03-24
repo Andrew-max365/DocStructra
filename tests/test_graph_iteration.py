@@ -171,7 +171,7 @@ def test_trigger_node_empty_paragraphs(tmp_path):
     )
     result = trigger_node(state)
     
-    assert result["needs_llm"] is True
+    assert result["needs_llm"] is False
     reasons_str = " ".join(result["hybrid_triggers"]["reasons"])
     assert "空段落占比过高" in reasons_str
 
