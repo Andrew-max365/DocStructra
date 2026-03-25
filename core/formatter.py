@@ -202,18 +202,20 @@ def _detect_section_role(paragraphs: List[Paragraph], base_role_getter) -> Dict:
         t = (p.text or "").strip()
         base_role = base_role_getter(p)
 
-        if base_role == "cover":
-            section_by_elem[p._p] = "cover"
-            continue
-        if _is_likely_cover_paragraph(idx, base_role, t):
+        # 1. 优先处理 cover
+        if base_role == "cover" or _is_likely_cover_paragraph(idx, base_role, t):
             section_by_elem[p._p] = "cover"
             continue
 
+        # 2. 改进的空行处理：空行不再打断状态，而是继承特殊状态
         if not t:
-            if current_scope in {"toc", "requirement"}:
+            if current_scope in {"toc", "requirement", "cover"}:
                 section_by_elem[p._p] = current_scope
+            else:
+                section_by_elem[p._p] = "blank"
             continue
 
+        # 3. 探测特殊区块的“入口”
         if RE_TOC_HEADING.match(t):
             current_scope = "toc"
             section_by_elem[p._p] = "toc"
@@ -224,16 +226,17 @@ def _detect_section_role(paragraphs: List[Paragraph], base_role_getter) -> Dict:
             section_by_elem[p._p] = "requirement"
             continue
 
-        # 到新的常规标题时，退出特殊 scope
-        if base_role in {"h1", "h2", "h3"}:
+        # 4. 探测特殊区块的“明确出口”
+        # 如果遇到了明确的一二级标题（比如“第一章 绪论”），说明目录或要求部分彻底结束了
+        if base_role in {"h1", "h2"}:
             current_scope = "body"
-            continue
+            # 不要 continue，让底下的逻辑去记录这个 h1/h2 的原始 role
 
+        # 5. 状态机维持逻辑（放宽容错）
         if current_scope == "toc":
-            if _is_toc_entry(p, t):
-                section_by_elem[p._p] = "toc"
-                continue
-            current_scope = "body"
+            # 只要没遇到 h1/h2 退出信号，我们默认它都是目录的一部分
+            section_by_elem[p._p] = "toc"
+            continue
 
         if current_scope == "requirement":
             section_by_elem[p._p] = "requirement"
@@ -643,7 +646,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     # 关键点：用底层 CT_P XML 元素做 key（而不是 Paragraph 包装对象），
     # 因为每次调用 iter_all_paragraphs 都会创建新的 Paragraph 包装对象，
     # 若用对象本身做 key 会导致 label_by_elem 查找永远失败。
-    orig_paras = iter_all_paragraphs(doc)
+    orig_paras = list(iter_all_paragraphs(doc))
     para_by_index = {i: p for i, p in enumerate(orig_paras)}
     label_by_elem: Dict = {}  # CT_P element -> role str
 
@@ -761,12 +764,12 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     report["actions"]["cleanup_consecutive_blank_keep"] = max_blank_keep
 
     # 2) 标题/题注后空段删光
-    deleted_after_roles = _delete_blanks_after_roles(doc, roles=remove_blank_after_roles, role_getter=get_role)
+    deleted_after_roles = _delete_blanks_after_roles(doc, roles=remove_blank_after_roles, role_getter=get_effective_role)
     report["actions"]["delete_blanks_after_titles_deleted"] = deleted_after_roles
 
     # 2.5) 表格单元格内联列表分隔符规范化：把"；N)"形式的分隔符替换为 '\n'，
     # 以便后续拆段步骤（步骤3）能识别并将各列表项拆成独立段落。
-    normalized_table_seps = _normalize_table_list_separators(doc, role_getter=get_role)
+    normalized_table_seps = _normalize_table_list_separators(doc, role_getter=get_effective_role)
     report["actions"]["table_inline_list_normalized"] = normalized_table_seps
 
     # 3) 核心修复：拆正文段落里的软回车换行（\n/\r/\v）
@@ -826,7 +829,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
 
         new_paras_from_split.append(child_p)
 
-    created_by_split = _split_body_paragraphs_on_linebreaks(doc, role_getter=get_role, on_new_paragraph=_inherit_label)
+    created_by_split = _split_body_paragraphs_on_linebreaks(doc, role_getter=get_effective_role, on_new_paragraph=_inherit_label)
     report["actions"]["split_body_new_paragraphs_created"] = created_by_split
     report["actions"]["split_body_original_paragraphs_affected"] = split_affected
     report["actions"]["split_body_max_lines_in_one_paragraph"] = split_max_lines

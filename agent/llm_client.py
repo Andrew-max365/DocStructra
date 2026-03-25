@@ -244,7 +244,8 @@ class LLMClient:
                 paragraphs_data = []
             roles = []
             valid_roles = {"h1", "h2", "h3", "body", "caption", "abstract", "keyword",
-                           "reference", "footer", "list_item", "blank"}
+                           "reference", "footer", "list_item", "blank",
+                           "cover", "toc", "requirement"}
             for item in paragraphs_data:
                 if not isinstance(item, dict):
                     continue

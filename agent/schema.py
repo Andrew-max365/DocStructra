@@ -45,7 +45,8 @@ class ParagraphRole(BaseModel):
     paragraph_index: int
     # LLM 判定的段落角色
     role: Literal["h1", "h2", "h3", "body", "caption", "abstract", "keyword",
-                  "reference", "footer", "list_item", "blank"]
+                  "reference", "footer", "list_item", "blank",
+                  "cover", "toc", "requirement"]
     # 置信度（0.0–1.0）
     confidence: float = Field(ge=0.0, le=1.0)
     # 判断依据
