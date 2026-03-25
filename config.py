@@ -15,7 +15,7 @@ LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
 LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o")
 
 # 请求超时秒数（强制正整数，小于 1 时修正为 1）
-LLM_TIMEOUT_S: int = max(1, int(os.getenv("LLM_TIMEOUT_S", "60")))
+LLM_TIMEOUT_S: int = max(1, int(os.getenv("LLM_TIMEOUT_S", "20")))
 
 # 建立 TCP 连接的超时秒数（应远小于读取超时）
 LLM_CONNECT_TIMEOUT_S: int = max(1, int(os.getenv("LLM_CONNECT_TIMEOUT_S", "10")))
