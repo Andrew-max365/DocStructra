@@ -55,7 +55,6 @@ def trigger_node(state: GraphState) -> dict:
     # 触发条件4：空段落密度过高 (>30%)
     empty_blocks = [b for b in blocks if not (b.text or "").strip()]
     if blocks and len(empty_blocks) / len(blocks) > 0.3:
-        triggered_indices.update(b.paragraph_index for b in empty_blocks)
         reasons.append(f"空段落占比过高({len(empty_blocks)}/{len(blocks)})，建议清理排版")
 
     # 触发条件5：字号极其不统一 (异常波动)
@@ -112,9 +111,16 @@ def reason_node(state: GraphState) -> dict:
     doc = state["doc"]
     rule_labels = state["labels"]
     triggered_indices = state.get("triggered_indices", [])
+    proofread_issues = state.get("proofread_issues", [])
+    if not triggered_indices:
+        return {
+            "thoughts": list(state.get("thoughts", [])) + [f"迭代 {iteration}: 未命中异常段落，跳过大模型调用。"],
+            "actions": list(state.get("actions", [])) + [[{"action_type": "no_op", "block_id": -1}]],
+            "proofread_issues": proofread_issues,
+            "current_iter": iteration,
+        }
 
     actions_to_take = []
-    proofread_issues = state.get("proofread_issues", [])
     thought = f"迭代 {iteration}: 雷达标记了 {len(triggered_indices)} 个异常段落，唤醒大模型进行深层结构分析与文本校对。"
 
     # 将视觉反馈注入 LLM 的分析上下文

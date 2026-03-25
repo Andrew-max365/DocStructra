@@ -3,9 +3,10 @@ import re
 from typing import Dict, List, Set
 from collections import Counter
 
-from docx.shared import Pt, RGBColor
+from docx.shared import Pt, RGBColor, Cm
 from docx.enum.text import WD_LINE_SPACING
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 
@@ -44,7 +45,11 @@ RE_NUM_DOT = re.compile(r"^\s*\d+(\.\d+){0,3}\s+")
 RE_ABSTRACT = re.compile(r"^\s*(摘要|abstract)\s*[:：]?\s*", re.IGNORECASE)
 RE_KEYWORD = re.compile(r"^\s*(关键词|关键字|keywords?)\s*[:：]?\s*", re.IGNORECASE)
 RE_REFERENCE = re.compile(r"^\s*(参考文献|references?|bibliography)\s*$", re.IGNORECASE)
+RE_TOC_HEADING = re.compile(r"^\s*(目录|contents?)\s*$", re.IGNORECASE)
+RE_REQUIREMENT_HEADING = re.compile(r"^\s*(课程要求|作业要求|实验要求|考核要求)\s*[:：]?\s*$", re.IGNORECASE)
 ROLE_LABELS_FALLBACK_TO_RULE = {"blank", "unknown"}
+COVER_MAX_LENGTH = 20
+COVER_KEYWORDS = ("报告", "论文", "课程设计", "课程", "作业")
 
 # 正文层级列表标记（不是章节标题，而是段落内编号列表项）
 # 注意：RE_SUBTITLE_CN 已捕获 （一） 形式（中文括号数字），这里只捕获阿拉伯数字括号/括号后缀/圈数字/英文字母
@@ -93,6 +98,43 @@ def _is_in_table_cell(p: Paragraph) -> bool:
     parent = p._p.getparent()
     return parent is not None and parent.tag == _qn("w:tc")
 
+
+
+def _apply_page_layout(doc, page_cfg: dict) -> int:
+    """Apply section-level page layout settings; returns changed section count."""
+    if not page_cfg:
+        return 0
+
+    changed = 0
+    for sec in getattr(doc, "sections", []):
+        touched = False
+        try:
+            margins = page_cfg.get("margins_cm", {})
+            if isinstance(margins, dict):
+                top = margins.get("top")
+                bottom = margins.get("bottom")
+                left = margins.get("left")
+                right = margins.get("right")
+                if top is not None:
+                    sec.top_margin = Cm(float(top)); touched = True
+                if bottom is not None:
+                    sec.bottom_margin = Cm(float(bottom)); touched = True
+                if left is not None:
+                    sec.left_margin = Cm(float(left)); touched = True
+                if right is not None:
+                    sec.right_margin = Cm(float(right)); touched = True
+
+            if page_cfg.get("header_distance_cm") is not None:
+                sec.header_distance = Cm(float(page_cfg["header_distance_cm"]))
+                touched = True
+            if page_cfg.get("footer_distance_cm") is not None:
+                sec.footer_distance = Cm(float(page_cfg["footer_distance_cm"]))
+                touched = True
+        except Exception:
+            pass
+        if touched:
+            changed += 1
+    return changed
 def _autofit_tables(doc) -> int:
     """Set all top-level tables to auto-fit window width. Returns count."""
     count = 0
@@ -103,6 +145,104 @@ def _autofit_tables(doc) -> int:
         except Exception:
             pass
     return count
+
+
+def _center_tables(doc) -> int:
+    """Center all tables. Returns count of tables successfully processed."""
+    count = 0
+    for table in doc.tables:
+        try:
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            count += 1
+        except Exception:
+            pass
+    return count
+
+
+def _paragraph_has_inline_drawing(p: Paragraph) -> bool:
+    """True if paragraph contains inline/anchored drawing (picture/shape)."""
+    try:
+        return bool(p._p.xpath(".//*[local-name()='drawing' or local-name()='pict']"))
+    except Exception:
+        return False
+
+
+def _detect_section_role(paragraphs: List[Paragraph], base_role_getter) -> Dict:
+    """
+    Detect section-level roles in document flow:
+    - cover: content before first structural body section (skip formatting)
+    - toc: table of contents heading and entries
+    - requirement: 课程要求等章节
+    """
+    section_by_elem: Dict = {}
+    current_scope = "body"
+
+    def _is_toc_entry(p: Paragraph, text: str) -> bool:
+        if p.style is not None and "toc" in (p.style.name or "").lower():
+            return True
+        if p._p.xpath(".//*[local-name()='instrText' and contains(., 'TOC')]"):
+            return True
+        # 匹配目录行：标题后跟导引点（ASCII 点号 ..... 或中文省略号 ……）并以页码结尾
+        # 例如：1 绪论........1
+        return bool(re.search(r"(?:\.{2,}|…{2,}).*\d+\s*$", text))
+
+    def _is_likely_cover_paragraph(idx: int, base_role: str, text: str) -> bool:
+        """Heuristic for cover-title line: first paragraph, body-like role, short title text."""
+        if idx != 0:
+            return False
+        if base_role != "body":
+            return False
+        if not text:
+            return False
+        if len(text) > COVER_MAX_LENGTH:
+            return False
+        return any(k in text for k in COVER_KEYWORDS)
+
+    for idx, p in enumerate(paragraphs):
+        t = (p.text or "").strip()
+        base_role = base_role_getter(p)
+
+        # 1. 优先处理 cover
+        if base_role == "cover" or _is_likely_cover_paragraph(idx, base_role, t):
+            section_by_elem[p._p] = "cover"
+            continue
+
+        # 2. 改进的空行处理：空行不再打断状态，而是继承特殊状态
+        if not t:
+            if current_scope in {"toc", "requirement", "cover"}:
+                section_by_elem[p._p] = current_scope
+            else:
+                section_by_elem[p._p] = "blank"
+            continue
+
+        # 3. 探测特殊区块的“入口”
+        if RE_TOC_HEADING.match(t):
+            current_scope = "toc"
+            section_by_elem[p._p] = "toc"
+            continue
+
+        if RE_REQUIREMENT_HEADING.match(t):
+            current_scope = "requirement"
+            section_by_elem[p._p] = "requirement"
+            continue
+
+        # 4. 探测特殊区块的“明确出口”
+        # 如果遇到了明确的一二级标题（比如“第一章 绪论”），说明目录或要求部分彻底结束了
+        if base_role in {"h1", "h2"}:
+            current_scope = "body"
+            # 不要 continue，让底下的逻辑去记录这个 h1/h2 的原始 role
+
+        # 5. 状态机维持逻辑（放宽容错）
+        if current_scope == "toc":
+            # 只要没遇到 h1/h2 退出信号，我们默认它都是目录的一部分
+            section_by_elem[p._p] = "toc"
+            continue
+
+        if current_scope == "requirement":
+            section_by_elem[p._p] = "requirement"
+            continue
+
+    return section_by_elem
 
 def looks_like_multiline_numbered_block(text: str) -> bool:
     t = text or ""
@@ -182,6 +322,10 @@ def detect_role(paragraph) -> str:
         return "h3"
     if "footer" in style_name or "页脚" in style_name:
         return "footer"
+    if "title" in style_name or "标题" == style_name.strip():
+        return "cover"
+    if "toc" in style_name or "目录" in style_name:
+        return "toc"
 
     t = text.strip()
 
@@ -191,6 +335,10 @@ def detect_role(paragraph) -> str:
         return "keyword"
     if RE_REFERENCE.match(t):
         return "reference"
+    if RE_TOC_HEADING.match(t):
+        return "toc"
+    if RE_REQUIREMENT_HEADING.match(t):
+        return "requirement"
     if RE_CAPTION.match(t):
         return "caption"
     if is_list_paragraph(paragraph):
@@ -479,6 +627,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     heading_cfg = cfg["heading"]
     caption_cfg = cfg.get("caption", None)
     paragraph_cfg = cfg.get("paragraph", {})
+    page_cfg = cfg.get("page", {})
 
     cleanup_cfg = cfg.get("cleanup", {})
     max_blank_keep = int(cleanup_cfg.get("max_consecutive_blank_paragraphs", 1))
@@ -497,7 +646,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     # 关键点：用底层 CT_P XML 元素做 key（而不是 Paragraph 包装对象），
     # 因为每次调用 iter_all_paragraphs 都会创建新的 Paragraph 包装对象，
     # 若用对象本身做 key 会导致 label_by_elem 查找永远失败。
-    orig_paras = iter_all_paragraphs(doc)
+    orig_paras = list(iter_all_paragraphs(doc))
     para_by_index = {i: p for i, p in enumerate(orig_paras)}
     label_by_elem: Dict = {}  # CT_P element -> role str
 
@@ -511,6 +660,18 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
 
     def get_role(p: Paragraph) -> str:
         return label_by_elem.get(p._p) or detect_role(p)
+
+    # section-aware role overrides: cover/toc/requirement
+    section_role_by_elem = _detect_section_role(orig_paras, detect_role)
+
+    def get_effective_role(p: Paragraph) -> str:
+        sec_role = section_role_by_elem.get(p._p)
+        if sec_role:
+            return sec_role
+        detected = detect_role(p)
+        if detected in {"cover", "toc", "requirement", "reference"}:
+            return detected
+        return get_role(p)
 
     # ====== Report（诊断/动作统计/可解释输出）======
     label_source = labels.get("_source", "unknown")
@@ -593,18 +754,22 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
         "formatted": {"counts": {}},
         "warnings": [],
     }
+    # 0) 页面级排版（section）
+    page_sections_changed = _apply_page_layout(doc, page_cfg)
+    report["actions"]["page_sections_changed"] = page_sections_changed
+
     # 1) 空段压缩/清理
     deleted_consecutive = _cleanup_consecutive_blanks(doc, max_blank_keep)
     report["actions"]["cleanup_consecutive_blanks_deleted"] = deleted_consecutive
     report["actions"]["cleanup_consecutive_blank_keep"] = max_blank_keep
 
     # 2) 标题/题注后空段删光
-    deleted_after_roles = _delete_blanks_after_roles(doc, roles=remove_blank_after_roles, role_getter=get_role)
+    deleted_after_roles = _delete_blanks_after_roles(doc, roles=remove_blank_after_roles, role_getter=get_effective_role)
     report["actions"]["delete_blanks_after_titles_deleted"] = deleted_after_roles
 
     # 2.5) 表格单元格内联列表分隔符规范化：把"；N)"形式的分隔符替换为 '\n'，
     # 以便后续拆段步骤（步骤3）能识别并将各列表项拆成独立段落。
-    normalized_table_seps = _normalize_table_list_separators(doc, role_getter=get_role)
+    normalized_table_seps = _normalize_table_list_separators(doc, role_getter=get_effective_role)
     report["actions"]["table_inline_list_normalized"] = normalized_table_seps
 
     # 3) 核心修复：拆正文段落里的软回车换行（\n/\r/\v）
@@ -664,7 +829,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
 
         new_paras_from_split.append(child_p)
 
-    created_by_split = _split_body_paragraphs_on_linebreaks(doc, role_getter=get_role, on_new_paragraph=_inherit_label)
+    created_by_split = _split_body_paragraphs_on_linebreaks(doc, role_getter=get_effective_role, on_new_paragraph=_inherit_label)
     report["actions"]["split_body_new_paragraphs_created"] = created_by_split
     report["actions"]["split_body_original_paragraphs_affected"] = split_affected
     report["actions"]["split_body_max_lines_in_one_paragraph"] = split_max_lines
@@ -676,13 +841,17 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
         if is_effectively_blank_paragraph(p):
             continue
 
-        role = get_role(p)
+        role = get_effective_role(p)
 
         # 标题/题注：去掉段尾多余换行
         if role in ("h1", "h2", "h3", "caption"):
             _strip_trailing_newlines_in_paragraph(p)
 
-        if role == "body":
+        if role == "cover":
+            # 封面跳过排版，保留原始格式
+            formatted_counter["cover_skipped"] += 1
+
+        elif role == "body":
             _apply_paragraph_common(p, body_line_spacing, body_before, body_after)
 
             # 普通正文与 Word 列表正文分别处理缩进，避免相互覆盖
@@ -766,7 +935,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
 
             formatted_counter["caption"] += 1
 
-        elif role in ("abstract", "keyword", "reference", "footer", "list_item"):
+        elif role in ("abstract", "keyword", "reference", "footer", "list_item", "toc", "requirement"):
             rc = cfg.get(role, {})
             size = float(rc.get("font_size_pt", body_size))
             bold = bool(rc.get("bold", False))
@@ -871,6 +1040,15 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     # 6) 表格自适应页宽
     tables_autofitted = _autofit_tables(doc)
     report["actions"]["tables_autofitted"] = tables_autofitted
+    tables_centered = _center_tables(doc)
+    report["actions"]["tables_centered"] = tables_centered
+
+    media_paragraphs_centered = 0
+    for p in iter_all_paragraphs(doc):
+        if _paragraph_has_inline_drawing(p):
+            p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            media_paragraphs_centered += 1
+    report["actions"]["media_paragraphs_centered"] = media_paragraphs_centered
 
 
     # ====== 追加诊断提示（让报告更“智能体”）======

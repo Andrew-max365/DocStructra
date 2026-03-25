@@ -13,6 +13,11 @@ body:
   space_after_pt: 0
   first_line_chars: 2
 
+page:
+  margins_cm: { top: 3.0, bottom: 2.5, left: 2.6, right: 2.6 }
+  header_distance_cm: 2.0
+  footer_distance_cm: 1.75
+
 paragraph:
   alignment: "justify"
 

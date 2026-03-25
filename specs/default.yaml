@@ -10,6 +10,10 @@ body:
   space_after_pt: 0
   first_line_chars: 2       # 首行缩进 2 字符（按字号换算）
 
+page:
+  margins_cm: { top: 2.54, bottom: 2.54, left: 3.18, right: 3.18 }
+  header_distance_cm: 1.5
+  footer_distance_cm: 1.5
 
 paragraph:
   alignment: "justify"    # 中文文档默认两端对齐

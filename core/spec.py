@@ -74,6 +74,11 @@ def _validate_and_fill_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
     paragraph.setdefault("alignment", "justify")
     cfg["paragraph"] = paragraph
 
+    # 页面级排版：可选字段，不提供时不改页面，避免破坏既有文档版式。
+    # 单位统一使用 cm，便于用户自然语言映射。
+    page = dict(cfg.get("page") or {})
+    cfg["page"] = page
+
     caption = dict(cfg.get("caption") or {})
     caption.setdefault("center", True)
     caption.setdefault("alignment", "center" if caption.get("center", True) else "left")
@@ -122,6 +127,24 @@ def _validate_and_fill_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
             "space_before_pt": 0,
             "space_after_pt": 0,
             "alignment": "center",
+        }),
+        ("toc", {
+            "font_size_pt": body_font_size,
+            "bold": False,
+            "italic": False,
+            "first_line_chars": 0,
+            "space_before_pt": 0,
+            "space_after_pt": 0,
+            "alignment": "left",
+        }),
+        ("requirement", {
+            "font_size_pt": body_font_size,
+            "bold": False,
+            "italic": False,
+            "first_line_chars": 2,
+            "space_before_pt": body_before,
+            "space_after_pt": body_after,
+            "alignment": "justify",
         }),
     ):
         role_cfg = dict(cfg.get(role_key) or {})
