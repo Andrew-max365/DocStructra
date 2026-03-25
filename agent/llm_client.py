@@ -69,6 +69,7 @@ class LLMClient:
             api_key=LLM_API_KEY,
             base_url=LLM_BASE_URL,
             timeout=openai.Timeout(LLM_TIMEOUT_S, connect=LLM_CONNECT_TIMEOUT_S),
+            max_retries=0
         )
 
     def _execute_chat_completion(self, messages: list, timeout: int | None = None) -> str:
