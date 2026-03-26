@@ -9,6 +9,8 @@ def ingest_node(state: GraphState) -> dict:
     from core.parser import parse_docx_to_blocks
     from core.judge import rule_based_labels
     from core.docx_utils import iter_all_paragraphs
+    from docx.oxml import OxmlElement
+    from docx.text.paragraph import Paragraph
     import logging
 
     logger = logging.getLogger(__name__)
@@ -18,54 +20,55 @@ def ingest_node(state: GraphState) -> dict:
     labels = rule_based_labels(blocks, doc=doc)
     labels["_source"] = "unified_workflow"
 
-    # ── LLM 页面分类：识别封面/目录等特殊页面，更新 labels ──
-    special_page_indices: List[int] = []
-    special_page_region_map: Dict[str, str] = {}
-
+    # ── LLM 正文范围识别：识别正文起止，并插入 {body} 标签 ──
     try:
-        from agent.llm_client import LLMClient, LLMCallError
-
+        from agent.llm_client import LLMClient
+        
         all_paragraphs = [p.text for p in iter_all_paragraphs(doc)]
-        # 只扫描开头 80 段（特殊页面均在文档开头）
         client = LLMClient()
-        skip_map = client.call_page_classification(all_paragraphs, scan_limit=80)
-
-        if skip_map:
-            # 构建 paragraph_index → block 的映射，便于找到对应 block_id
-            index_to_block = {b.paragraph_index: b for b in blocks}
-
-            # region → labels 角色映射
-            _region_to_role = {
-                "cover": "cover",
-                "toc": "toc",
-                "skip_other": "cover",   # 其他特殊页暂时归为 cover（排版时同样跳过）
-            }
-
-            for pidx, region in skip_map.items():
-                b = index_to_block.get(pidx)
-                if b is None:
-                    continue
-                role = _region_to_role.get(region, "cover")
-                labels[b.block_id] = role
-                special_page_indices.append(pidx)
-                special_page_region_map[pidx] = region
-
-            special_page_indices.sort()
-            logger.info(
-                f"[page_classify] LLM 识别到 {len(skip_map)} 个特殊页面段落，"
-                f"已标记为跳过: {dict(list(skip_map.items())[:10])}"
-            )
+        range_res = client.call_body_range_identification(all_paragraphs)
+        
+        start_idx = range_res.get("start_index", 0)
+        end_idx = range_res.get("end_index", len(all_paragraphs) - 1)
+        
+        # 为了不破坏后续 block 的映射，我们在 doc 中插入标记段落。
+        # 注意：从后往前插入，避免前面的索引变动。
+        
+        # 插入 {/body}
+        # 如果 end_idx 是最后一段，则在最后追加；否则在 end_idx+1 段之前插
+        paragraphs_list = list(iter_all_paragraphs(doc))
+        if end_idx < len(paragraphs_list):
+            target_p = paragraphs_list[end_idx]
+            new_p = OxmlElement('w:p')
+            target_p._p.addnext(new_p)
+            new_para = Paragraph(new_p, target_p._parent)
+            new_para.add_run("{/body}")
+        
+        # 插入 {body}
+        if start_idx < len(paragraphs_list):
+            target_p = paragraphs_list[start_idx]
+            new_p = OxmlElement('w:p')
+            target_p._p.addprevious(new_p)
+            new_para = Paragraph(new_p, target_p._parent)
+            new_para.add_run("{body}")
+            
+        logger.info(f"[body_range] 识别到正文范围: {start_idx}-{end_idx}, 已插入标记")
+        
+        # 重新解析 blocks，因为我们改变了文档结构（增加了两个段落）
+        # 重新调用 parse_docx_to_blocks 有点重，但最保险
+        # 这里的 blocks 用于后续的 label 映射，需要与 doc 同步
+        _, blocks = parse_docx_to_blocks(state["input_path"], doc=doc)
+        # 重新生成 labels
+        labels = rule_based_labels(blocks, doc=doc)
+        labels["_source"] = "unified_workflow_with_body_tags"
 
     except Exception as e:
-        # LLM 页面分类失败不影响主流程，静默降级到纯规则模式
-        logger.warning(f"[page_classify] 页面分类异常（已降级为纯规则模式）: {e}")
+        logger.warning(f"[body_range] 识别正文范围失败: {e}")
 
     return {
         "doc": doc,
         "blocks": blocks,
         "labels": labels,
-        "special_page_indices": special_page_indices,
-        "special_page_region_map": special_page_region_map,
     }
 
 

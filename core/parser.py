@@ -14,8 +14,11 @@ class Block:
     paragraph_index: int
 
 
-def parse_docx_to_blocks(docx_path: str) -> Tuple[Document, List[Block]]:
-    doc = Document(docx_path)
+def parse_docx_to_blocks(docx_path: str = None, doc: Document = None) -> Tuple[Document, List[Block]]:
+    if doc is None:
+        if docx_path is None:
+            raise ValueError("Must provide either docx_path or doc object")
+        doc = Document(docx_path)
     blocks: List[Block] = []
     for i, p in enumerate(iter_all_paragraphs(doc), start=1):
         blocks.append(Block(

@@ -58,9 +58,6 @@ class GraphState(TypedDict):
     triggered_indices: List[int]
     hybrid_triggers: dict
     proofread_issues: List[dict]
-    # --- 页面分类：LLM 识别出的特殊页面（封面/目录等），排版时跳过 ---
-    special_page_indices: List[int]           # 需要跳过的段落序号列表
-    special_page_region_map: Dict[int, str]   # paragraph_index -> region 类型
     # --- Phase 3: 视觉反思 ---
     visual_review_result: Optional[dict]     # VisualReviewResult 序列化
     reflection_count: int                     # 当前反思迭代次数

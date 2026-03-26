@@ -65,8 +65,6 @@ async def run_react_agent_stream(
         "triggered_indices": [],
         "hybrid_triggers": {},
         "proofread_issues": [],
-        "special_page_indices": [],
-        "special_page_region_map": {},
         "visual_review_result": None,
         "reflection_count": 0,
         "reflection_history": [],
@@ -112,8 +110,6 @@ def run_react_agent(
         "triggered_indices": [],
         "hybrid_triggers": {},
         "proofread_issues": [],
-        "special_page_indices": [],
-        "special_page_region_map": {},
         # Phase 3: 视觉反思初始值
         "visual_review_result": None,
         "reflection_count": 0,

@@ -20,6 +20,31 @@ def is_mostly_ascii(s: str) -> bool:
     return hits / max(1, len(s)) >= 0.4
 
 
+def is_drawing_paragraph(p: Paragraph) -> bool:
+    """True if paragraph contains inline/anchored drawing (picture/shape/object)."""
+    try:
+        # Use local-name() to be namespace-agnostic
+        return bool(p._p.xpath(".//*[local-name()='drawing' or local-name()='pict' or local-name()='object']"))
+    except Exception:
+        return False
+
+
+def is_pure_drawing_paragraph(p: Paragraph) -> bool:
+    """True if paragraph contains drawings and the visible text is minimal (likely a standalone image)."""
+    if not is_drawing_paragraph(p):
+        return False
+    # 只要文字长度超过 15 个字符，就不认为它是纯图段落（保护含内联图的正文段）
+    return len((p.text or "").strip()) < 15
+
+
+def is_drawing_run(run) -> bool:
+    """True if run contains drawing elements."""
+    try:
+        return bool(run._element.xpath(".//*[local-name()='drawing' or local-name()='pict' or local-name()='object']"))
+    except Exception:
+        return False
+
+
 def _ensure_rpr_rfonts(run):
     """确保 run._element 下存在 w:rPr 和 w:rFonts，避免 None 崩溃。"""
     r = run._element
@@ -72,28 +97,35 @@ def copy_run_style(src_run, dst_run):
     sf = src_run.font
     df = dst_run.font
 
-    df.size = sf.size
-    df.bold = sf.bold
-    df.italic = sf.italic
-    df.underline = sf.underline
-    df.strike = sf.strike
-    df.double_strike = sf.double_strike
-    df.subscript = sf.subscript
-    df.superscript = sf.superscript
-    df.small_caps = sf.small_caps
-    df.all_caps = sf.all_caps
-    df.shadow = sf.shadow
-    df.outline = sf.outline
-    df.hidden = sf.hidden
-    df.highlight_color = sf.highlight_color
+    def safe_copy(attr):
+        try:
+            val = getattr(sf, attr)
+            setattr(df, attr, val)
+        except Exception:
+            pass
+
+    attrs = [
+        "size", "bold", "italic", "underline", "strike", "double_strike",
+        "subscript", "superscript", "small_caps", "all_caps", "shadow",
+        "outline", "hidden"
+    ]
+    for a in attrs:
+        safe_copy(a)
+
+    # 特殊处理 highlight_color，因为它最容易因为 'none' 等值崩溃
+    try:
+        df.highlight_color = sf.highlight_color
+    except Exception:
+        pass
 
     # 保留颜色（RGB/主题色）
     try:
-        if sf.color is not None:
-            if sf.color.rgb is not None:
-                df.color.rgb = sf.color.rgb
-            if sf.color.theme_color is not None:
-                df.color.theme_color = sf.color.theme_color
+        color = sf.color
+        if color is not None:
+            if getattr(color, 'rgb', None) is not None:
+                df.color.rgb = color.rgb
+            if getattr(color, 'theme_color', None) is not None:
+                df.color.theme_color = color.theme_color
     except Exception:
         pass
 
@@ -122,6 +154,11 @@ def normalize_mixed_runs(paragraph: Paragraph):
     """
     runs = list(iter_paragraph_runs(paragraph))
     for run in runs:
+        # SAFETY: If run has drawings/images, do NOT normalize it by clearing runs,
+        # as it would "swallow" the image.
+        if is_drawing_run(run):
+            continue
+
         text = run.text or ""
         parts = split_text_by_script(text)
         if len(parts) <= 1:
@@ -210,6 +247,12 @@ def is_effectively_blank_paragraph(p) -> bool:
     """
     更强的空段判断：把全角空格、NBSP、制表符等也视为“空”
     """
+    # Safety check for deleted/disposed paragraphs
+    if getattr(p, '_p', None) is None:
+        return True
+
+    if is_drawing_paragraph(p):
+        return False
 
     def norm(s: str) -> str:
         return (s or "").replace("\u3000", "").replace("\xa0", "").replace("\t", "")
@@ -218,7 +261,7 @@ def is_effectively_blank_paragraph(p) -> bool:
     if text.strip():
         return False
 
-    for r in p.runs:
+    for r in getattr(p, 'runs', []):
         if norm(r.text).strip():
             return False
     return True

@@ -1,10 +1,12 @@
 # core/formatter.py
 import re
+import logging
+logger = logging.getLogger(__name__)
 from typing import Dict, List, Set
 from collections import Counter
 
 from docx.shared import Pt, RGBColor, Cm
-from docx.enum.text import WD_LINE_SPACING
+from docx.enum.text import WD_LINE_SPACING, WD_BREAK
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
@@ -15,6 +17,8 @@ from .spec import Spec
 from .docx_utils import (
     copy_run_style,
     delete_paragraph,
+    is_drawing_paragraph,
+    is_pure_drawing_paragraph,
     is_effectively_blank_paragraph,
     iter_all_paragraphs,
     iter_paragraph_runs,
@@ -36,7 +40,7 @@ from .numbering import (
 
 RE_SUBTITLE_CN = re.compile(r"^\s*（[一二三四五六七八九十]+）")  # （一）
 RE_CAPTION = re.compile(
-    r"^\s*(图|表|Figure|Fig\.|Table)\s*[\d一二三四五六七八九十]+([\-–—]\d+)?",
+    r"^\s*(图|表|Figure|Fig\.|Table)\s*[\d一二三四五六七八九十]+(?:[\-–—]\d+)?(?:[\.．:：\s\t]|$)",
     re.IGNORECASE
 )
 
@@ -46,7 +50,7 @@ RE_ABSTRACT = re.compile(r"^\s*(摘要|abstract)\s*[:：]?\s*", re.IGNORECASE)
 RE_KEYWORD = re.compile(r"^\s*(关键词|关键字|keywords?)\s*[:：]?\s*", re.IGNORECASE)
 RE_REFERENCE = re.compile(r"^\s*(参考文献|references?|bibliography)\s*$", re.IGNORECASE)
 RE_TOC_HEADING = re.compile(r"^\s*(目录|contents?)\s*$", re.IGNORECASE)
-RE_REQUIREMENT_HEADING = re.compile(r"^\s*(课程要求|作业要求|实验要求|考核要求)\s*[:：]?\s*$", re.IGNORECASE)
+RE_REQUIREMENT_HEADING = re.compile(r"^\s*(课程要求|作业要求|实验要求|考核要求|内容要求)\s*[:：]?\s*$", re.IGNORECASE)
 ROLE_LABELS_FALLBACK_TO_RULE = {"blank", "unknown"}
 COVER_MAX_LENGTH = 20
 COVER_KEYWORDS = ("报告", "论文", "课程设计", "课程", "作业")
@@ -95,6 +99,8 @@ def is_list_paragraph(p: Paragraph) -> bool:
 def _is_in_table_cell(p: Paragraph) -> bool:
     """True if paragraph lives inside a table cell (w:tc element)."""
     from docx.oxml.ns import qn as _qn
+    if p._p is None:
+        return False
     parent = p._p.getparent()
     return parent is not None and parent.tag == _qn("w:tc")
 
@@ -159,12 +165,6 @@ def _center_tables(doc) -> int:
     return count
 
 
-def _paragraph_has_inline_drawing(p: Paragraph) -> bool:
-    """True if paragraph contains inline/anchored drawing (picture/shape)."""
-    try:
-        return bool(p._p.xpath(".//*[local-name()='drawing' or local-name()='pict']"))
-    except Exception:
-        return False
 
 
 def _detect_section_role(paragraphs: List[Paragraph], base_role_getter) -> Dict:
@@ -257,6 +257,9 @@ def _clear_paragraph_runs(p):
 
 
 def _strip_trailing_newlines_in_paragraph(p):
+    """去掉段尾多余换行。如果段落含图片则跳过，避免 _clear_paragraph_runs 吞掉图片。"""
+    if is_drawing_paragraph(p):
+        return
     txt = p.text or ""
     new_txt = txt.rstrip("\r\n")
     if new_txt == txt:
@@ -326,6 +329,8 @@ def detect_role(paragraph) -> str:
         return "cover"
     if "toc" in style_name or "目录" in style_name:
         return "toc"
+    if "caption" in style_name or "题注" in style_name:
+        return "caption"
 
     t = text.strip()
 
@@ -426,13 +431,19 @@ def _first_line_indent_pt(chars: int, font_size_pt: float) -> Pt:
     return Pt(chars * font_size_pt)
 
 
-def _cleanup_consecutive_blanks(doc, max_keep: int) -> int:
+def _cleanup_consecutive_blanks(doc, max_keep: int, paras: List[Paragraph] = None) -> int:
     """压缩连续空段：最多保留 max_keep 个（0=全删）。返回删除的空段数量。"""
     blank_run = 0
     to_delete = []
     last_parent = None
-    for p in list(iter_all_paragraphs(doc)):
-        cur_parent = p._element.getparent()
+    if paras is None:
+        paras = list(iter_all_paragraphs(doc))
+    for p in paras:
+        # Safety check for already-deleted/stale paragraphs
+        if getattr(p, '_p', None) is None:
+            continue
+
+        cur_parent = p._p.getparent()
         if cur_parent is not last_parent:
             # 不跨容器（正文/单元格）累计空段，避免误删
             blank_run = 0
@@ -452,23 +463,34 @@ def _cleanup_consecutive_blanks(doc, max_keep: int) -> int:
     return deleted
 
 
-def _delete_blanks_after_roles(doc, roles: Set[str], role_getter=None) -> int:
+def _delete_blanks_after_roles(doc, roles: Set[str], role_getter=None, paras: List[Paragraph] = None) -> int:
     """删除“标题/题注后紧跟的所有空段”。返回删除数量。"""
     if role_getter is None:
         role_getter = detect_role
 
     to_delete = []
-    paras = list(iter_all_paragraphs(doc))
+    if paras is None:
+        paras = list(iter_all_paragraphs(doc))
     i = 0
     while i < len(paras):
         cur = paras[i]
+        # Safety check for already-deleted/stale paragraphs
+        if getattr(cur, '_p', None) is None:
+            i += 1
+            continue
+
         cur_role = role_getter(cur)
         if cur_role in roles:
-            cur_parent = cur._element.getparent()
+            cur_parent = cur._p.getparent()
             j = i + 1
             while j < len(paras):
                 nxt = paras[j]
-                if nxt._element.getparent() is not cur_parent:
+                # Safety check for nxt being stale
+                if getattr(nxt, '_p', None) is None:
+                    j += 1
+                    continue
+
+                if nxt._p.getparent() is not cur_parent:
                     break
                 if not is_effectively_blank_paragraph(nxt):
                     break
@@ -481,7 +503,7 @@ def _delete_blanks_after_roles(doc, roles: Set[str], role_getter=None) -> int:
     return len(to_delete)
 
 
-def _normalize_table_list_separators(doc, role_getter=None) -> int:
+def _normalize_table_list_separators(doc, role_getter=None, paras: List[Paragraph] = None) -> int:
     """
     表格单元格内列表项预处理：把"；N)"/"；（N）"等内联分隔符替换为 '\\n'，
     以便后续 _split_body_paragraphs_on_linebreaks 正确将其拆成独立段落。
@@ -493,7 +515,9 @@ def _normalize_table_list_separators(doc, role_getter=None) -> int:
         role_getter = detect_role
 
     modified = 0
-    for p in list(iter_all_paragraphs(doc)):
+    if paras is None:
+        paras = list(iter_all_paragraphs(doc))
+    for p in paras:
         if not _is_in_table_cell(p):
             continue
         if is_effectively_blank_paragraph(p):
@@ -518,25 +542,23 @@ def _normalize_table_list_separators(doc, role_getter=None) -> int:
     return modified
 
 
-def _split_body_paragraphs_on_linebreaks(doc, role_getter=None, on_new_paragraph=None) -> int:
+def _split_body_paragraphs_on_linebreaks(doc, role_getter=None, on_new_paragraph=None, paras: List[Paragraph] = None) -> int:
     """
-    关键修复：
-    把正文/列表段落里的 '\n'（通常是 Shift+Enter 软回车）拆成多个段落，
-    这样每一条（比如 \n1. \n2.）都能被后续编号转换识别。
-
-    - role_getter: 用于判断某段是否可拆分（默认 detect_role）。
-    - on_new_paragraph(parent, child): 可选回调；当从 parent 拆出 child 时调用。
-      用于“继承标签/元数据”等（例如：child 的 role 继承 parent）。
-
-    返回：新增段落数量（插入了多少个新段落）。
+    把正文/列表段落里的 '\n'（通常是 Shift+Enter 软回车）拆成多个段落。
     """
     if role_getter is None:
         role_getter = detect_role
 
     created = 0
-    # 使用快照：覆盖正文与表格段落，同时避免边插入边遍历造成错位
-    for p in list(iter_all_paragraphs(doc)):
+    if paras is None:
+        paras = list(iter_all_paragraphs(doc))
+    for p in paras:
         if is_effectively_blank_paragraph(p):
+            continue
+
+        # SAFETY: If paragraph has drawings/images, do NOT split it by clearing runs,
+        # as it would "swallow" the image.
+        if is_drawing_paragraph(p):
             continue
 
         # 只拆正文/列表/unknown；标题/题注不拆，避免破坏结构
@@ -642,11 +664,30 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
 
     body_alignment = _resolve_alignment(paragraph_cfg.get("alignment", "justify"))
 
+    def _build_body_scope_from_sentinel(paras: List[Paragraph]) -> set:
+        has_tag = any("{body}" in (p.text or "") for p in paras)
+        in_range = not has_tag
+        body_elements = set()
+        for p in paras:
+            t = (p.text or "").strip()
+            if "{body}" in t:
+                in_range = True
+                continue
+            if "{/body}" in t:
+                in_range = False
+                continue
+            if in_range:
+                body_elements.add(p._p)
+        return body_elements
+
+    orig_paras = list(iter_all_paragraphs(doc))
+    in_body_scope_elems = _build_body_scope_from_sentinel(orig_paras)
+    logger.info(f"[scope] 排版范围锁定: {len(in_body_scope_elems)} 个段落节点。")
+
     # ====== 角色映射：优先 labels，缺失才 fallback detect_role ======
     # 关键点：用底层 CT_P XML 元素做 key（而不是 Paragraph 包装对象），
     # 因为每次调用 iter_all_paragraphs 都会创建新的 Paragraph 包装对象，
     # 若用对象本身做 key 会导致 label_by_elem 查找永远失败。
-    orig_paras = list(iter_all_paragraphs(doc))
     para_by_index = {i: p for i, p in enumerate(orig_paras)}
     label_by_elem: Dict = {}  # CT_P element -> role str
 
@@ -668,6 +709,31 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     _SKIP_ROLES = {"cover", "toc", "requirement", "reference"}
 
     def get_effective_role(p: Paragraph) -> str:
+        # 1. 基础识别逻辑
+        res = _get_effective_role_raw(p)
+
+        # 2. 极其严格的 Caption（图例/题注）二次校验
+        # 只有在明确具有图例特征时才允许居中对齐，否则强制转为 body
+        if res == "caption":
+            txt = (p.text or "").strip()
+            # 必须匹配 RE_CAPTION 正则或是具有明确的 Word 题注样式
+            style_name = ""
+            try:
+                style_name = (p.style.name or "").lower()
+            except:
+                pass
+            is_valid_caption_style = "caption" in style_name or "题注" in style_name
+            
+            if not (RE_CAPTION.match(txt) or is_valid_caption_style):
+                return "body"
+
+        return res
+
+    def _get_effective_role_raw(p: Paragraph) -> str:
+        # 0. 区域排版边界控制：不在 {body} 闭 closure 内的，统统视为 cover 跳过排版
+        if p._p not in in_body_scope_elems:
+            return "cover"
+
         # 1. section 状态机结果优先（基于文档结构流的上下文推断）
         sec_role = section_role_by_elem.get(p._p)
         if sec_role:
@@ -772,18 +838,25 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     page_sections_changed = _apply_page_layout(doc, page_cfg)
     report["actions"]["page_sections_changed"] = page_sections_changed
 
+    body_paras_only = [p for p in orig_paras if p._p in in_body_scope_elems]
+
     # 1) 空段压缩/清理
-    deleted_consecutive = _cleanup_consecutive_blanks(doc, max_blank_keep)
+    deleted_consecutive = _cleanup_consecutive_blanks(doc, max_blank_keep, paras=body_paras_only)
     report["actions"]["cleanup_consecutive_blanks_deleted"] = deleted_consecutive
     report["actions"]["cleanup_consecutive_blank_keep"] = max_blank_keep
 
+    # Refilter body paragraphs after potential deletions in stage 1
+    body_paras_only = [p for p in body_paras_only if getattr(p, '_p', None) is not None]
+
     # 2) 标题/题注后空段删光
-    deleted_after_roles = _delete_blanks_after_roles(doc, roles=remove_blank_after_roles, role_getter=get_effective_role)
+    deleted_after_roles = _delete_blanks_after_roles(doc, roles=remove_blank_after_roles, role_getter=get_effective_role, paras=body_paras_only)
     report["actions"]["delete_blanks_after_titles_deleted"] = deleted_after_roles
 
-    # 2.5) 表格单元格内联列表分隔符规范化：把"；N)"形式的分隔符替换为 '\n'，
-    # 以便后续拆段步骤（步骤3）能识别并将各列表项拆成独立段落。
-    normalized_table_seps = _normalize_table_list_separators(doc, role_getter=get_effective_role)
+    # Refilter body paragraphs after potential deletions in stage 2
+    body_paras_only = [p for p in body_paras_only if getattr(p, '_p', None) is not None]
+
+    # 2.5) 表格单元格内联列表分隔符规范化
+    normalized_table_seps = _normalize_table_list_separators(doc, role_getter=get_effective_role, paras=body_paras_only)
     report["actions"]["table_inline_list_normalized"] = normalized_table_seps
 
     # 3) 核心修复：拆正文段落里的软回车换行（\n/\r/\v）
@@ -791,12 +864,14 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     split_affected = 0
     split_max_lines = 0
     split_estimated_new = 0
-    for p in orig_paras:
+    for p in body_paras_only:
+        if getattr(p, '_p', None) is None:
+            continue
         if is_effectively_blank_paragraph(p):
             continue
-        if get_role(p) not in {"body", "list_item", "unknown"}:
+        if get_effective_role(p) not in {"body", "list_item", "unknown"}:
             continue
-        t = p.text or ""
+        t = hasattr(p, 'text') and p.text or ""
         if RE_SOFT_LINEBREAK.search(t) is None:
             continue
         lines = [ln.strip() for ln in re.split(r"[\n\r\v]", t) if ln.strip()]
@@ -843,7 +918,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
 
         new_paras_from_split.append(child_p)
 
-    created_by_split = _split_body_paragraphs_on_linebreaks(doc, role_getter=get_effective_role, on_new_paragraph=_inherit_label)
+    created_by_split = _split_body_paragraphs_on_linebreaks(doc, role_getter=get_effective_role, on_new_paragraph=_inherit_label, paras=body_paras_only)
     report["actions"]["split_body_new_paragraphs_created"] = created_by_split
     report["actions"]["split_body_original_paragraphs_affected"] = split_affected
     report["actions"]["split_body_max_lines_in_one_paragraph"] = split_max_lines
@@ -851,7 +926,9 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
 
     # 4) 套格式
     formatted_counter = Counter()
-    for p in iter_all_paragraphs(doc):
+
+    paras_for_formatting = list(iter_all_paragraphs(doc))
+    for p in paras_for_formatting:
         if is_effectively_blank_paragraph(p):
             continue
 
@@ -869,7 +946,13 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
             _apply_paragraph_common(p, body_line_spacing, body_before, body_after)
 
             # 普通正文与 Word 列表正文分别处理缩进，避免相互覆盖
-            if is_list_paragraph(p):
+            if is_pure_drawing_paragraph(p):
+                p.paragraph_format.left_indent = Pt(0)
+                p.paragraph_format.hanging_indent = Pt(0)
+                p.paragraph_format.first_line_indent = Pt(0)
+                p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                formatted_counter["image_body"] += 1
+            elif is_list_paragraph(p):
                 p.paragraph_format.left_indent = Pt(list_left_indent)
                 p.paragraph_format.hanging_indent = Pt(list_hanging_indent)
                 p.paragraph_format.first_line_indent = Pt(0)
@@ -924,28 +1007,23 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
             formatted_counter[role] += 1
 
         elif role == "caption":
-            if caption_cfg:
-                size = float(caption_cfg.get("font_size_pt", body_size))
-                bold = bool(caption_cfg.get("bold", False))
-                before = float(caption_cfg.get("space_before_pt", body_before))
-                after = float(caption_cfg.get("space_after_pt", body_after))
+            # 无论 caption_cfg 是否为空，我们都要保证标题默认居中
+            size = float(caption_cfg.get("font_size_pt", body_size)) if caption_cfg else body_size
+            bold = bool(caption_cfg.get("bold", False)) if caption_cfg else False
+            before = float(caption_cfg.get("space_before_pt", body_before)) if caption_cfg else body_before
+            after = float(caption_cfg.get("space_after_pt", body_after)) if caption_cfg else body_after
 
-                _apply_paragraph_common(p, body_line_spacing, before, after)
-                p.paragraph_format.left_indent = Pt(0)
-                p.paragraph_format.hanging_indent = Pt(0)
-                p.paragraph_format.first_line_indent = Pt(0)
-                cap_align = _resolve_alignment(caption_cfg.get("alignment", "center" if caption_cfg.get("center", True) else "left"))
-                if cap_align is not None:
-                    p.paragraph_format.alignment = cap_align
-                _apply_runs_font(p, zh_font, en_font, size_pt=size, force_bold=bold)
-            else:
-                _apply_paragraph_common(p, body_line_spacing, body_before, body_after)
-                p.paragraph_format.left_indent = Pt(0)
-                p.paragraph_format.hanging_indent = Pt(0)
-                p.paragraph_format.first_line_indent = Pt(0)
-                if body_alignment is not None:
-                    p.paragraph_format.alignment = body_alignment
-                _apply_runs_font(p, zh_font, en_font, size_pt=body_size, force_bold=None)
+            _apply_paragraph_common(p, body_line_spacing, before, after)
+            p.paragraph_format.left_indent = Pt(0)
+            p.paragraph_format.hanging_indent = Pt(0)
+            p.paragraph_format.first_line_indent = Pt(0)
+            
+            # 使用配置中的 alignment，如果未配置或者 caption_cfg 为空，则默认 center 
+            cap_align_str = caption_cfg.get("alignment", "center" if caption_cfg.get("center", True) else "left") if caption_cfg else "center"
+            cap_align = _resolve_alignment(cap_align_str)
+            if cap_align is not None:
+                p.paragraph_format.alignment = cap_align
+            _apply_runs_font(p, zh_font, en_font, size_pt=size, force_bold=bold)
 
             formatted_counter["caption"] += 1
 
@@ -988,14 +1066,21 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
             _apply_paragraph_common(p, body_line_spacing, body_before, body_after)
             p.paragraph_format.left_indent = Pt(0)
             p.paragraph_format.hanging_indent = Pt(0)
-            if _is_in_table_cell(p):
+            if is_drawing_paragraph(p):
+                p.paragraph_format.first_line_indent = Pt(0)
+                p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                formatted_counter["image_body"] += 1
+            elif _is_in_table_cell(p):
                 p.paragraph_format.first_line_indent = Pt(0)
             else:
                 p.paragraph_format.first_line_indent = _first_line_indent_pt(first_line_chars, body_size)
-            if body_alignment is not None:
+            
+            if body_alignment is not None and not is_drawing_paragraph(p):
                 p.paragraph_format.alignment = body_alignment
             _apply_runs_font(p, zh_font, en_font, size_pt=body_size, force_bold=None)
             formatted_counter["unknown_as_body"] += 1
+
+
 
     # 4.5) 已废弃：原 LLM 直接驱动的 list_item 编号转换逻辑已合并到步骤 5。
     # 步骤 5 的 convert_text_lists 现在同时处理 list_item 和 body/unknown 段落，
@@ -1014,7 +1099,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
         converted_to_numpr, step5_converted_paras = convert_text_lists(
             doc,
             iter_all_paragraphs(doc),
-            get_role,
+            get_effective_role,
             is_list_paragraph,
             is_effectively_blank_paragraph,
             min_run_len=min_run_len,
@@ -1059,7 +1144,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
 
     media_paragraphs_centered = 0
     for p in iter_all_paragraphs(doc):
-        if _paragraph_has_inline_drawing(p):
+        if is_pure_drawing_paragraph(p):
             p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
             media_paragraphs_centered += 1
     report["actions"]["media_paragraphs_centered"] = media_paragraphs_centered
@@ -1086,7 +1171,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
         )
 
     # 4) 标题层级提示：h3 前无 h2
-    roles_seq = [get_role(p) for p in iter_all_paragraphs(doc) if not is_effectively_blank_paragraph(p)]
+    roles_seq = [get_effective_role(p) for p in iter_all_paragraphs(doc) if not is_effectively_blank_paragraph(p)]
     h2_seen = False
     orphan_h3 = 0
     for r in roles_seq:
@@ -1108,8 +1193,29 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     except Exception:
         report["actions"]["split_body_new_paragraph_roles"] = {}
 
-    all_after = iter_all_paragraphs(doc)
-    report["meta"]["paragraphs_after"] = len(all_after)
-    report["meta"]["blank_paragraphs_after"] = sum(1 for p in all_after if is_effectively_blank_paragraph(p))
+    # 7) --- 清理标记段落并插入分页符 ---
+    # 使用后置扫描以保证鲁棒性
+    final_paras_for_cleanup = list(iter_all_paragraphs(doc))
+    for p in final_paras_for_cleanup:
+        try:
+            full_text = p.text or ""
+            if "{body}" in full_text:
+                delete_paragraph(p)
+            elif "{/body}" in full_text:
+                # 依据要求：在正文结束处确保分页
+                p.text = ""
+                p.add_run().add_break(WD_BREAK.PAGE)
+        except Exception:
+            pass
+
+    # === 表格自动居中 ===
+    centered_tables = _center_tables(doc)
+    report["actions"]["tables_centered"] = centered_tables
+
+    # 最后计算报告统计数据
+    all_final = iter_all_paragraphs(doc)
+    report["meta"]["paragraphs_after"] = len(all_final)
+    report["meta"]["blank_paragraphs_after"] = sum(1 for p in all_final if is_effectively_blank_paragraph(p))
     report["formatted"]["counts"] = dict(formatted_counter)
+                
     return report

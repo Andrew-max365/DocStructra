@@ -12,18 +12,25 @@ PROOFREAD_SYSTEM_PROMPT = (
     "你的任务是：对给定的文档段落进行校对，仅找出以下三类问题：\n"
     "  1. 错别字（typo）：错误使用的汉字、词语\n"
     "  2. 标点符号（punctuation）：标点使用不当、中英文标点混用、句末标点缺漏等\n"
-    "  3. 规范性问题（standardization）：数字写法不规范、用语不统一、格式不统一等\n"
-    "你必须严格按照 JSON Schema 输出，不得包含任何额外说明文字。\n"
-    "输出的 JSON 必须包含字段：doc_language, issues（数组）。\n"
-    "每条问题必须包含以下字段：\n"
-    "  issue_type: typo（错别字）/ punctuation（标点）/ standardization（规范性）\n"
-    "  severity: low / medium / high\n"
-    "  paragraph_index（可选）: 问题所在段落序号\n"
-    "  evidence: 原文中有问题的片段（原样引用）\n"
-    "  suggestion: 建议的修改内容\n"
-    "  rationale: 问题说明\n"
+    "  3. 规范性问题（standardization）：数字写法不规范、用语不统一、格式不统一等\n\n"
+    "【铁律：输出格式】\n"
+    "你必须严格按照以下 JSON 格式输出，不得包含任何额外说明文字或 Markdown 以外的字符。\n"
+    "JSON 结构示例：\n"
+    "{\n"
+    "  \"doc_language\": \"zh\",\n"
+    "  \"issues\": [\n"
+    "    {\n"
+    "      \"issue_type\": \"typo\",\n"
+    "      \"severity\": \"medium\",\n"
+    "      \"paragraph_index\": 5,\n"
+    "      \"evidence\": \"这段文字里的错别字。\",\n"
+    "      \"suggestion\": \"这段文字里的正确字。\",\n"
+    "      \"rationale\": \"'别'字误用。\"\n"
+    "    }\n"
+    "  ]\n"
+    "}\n\n"
+    "注意：doc_language 必须是一个简单的字符串（如 \"zh\"），绝对不能是一个字典或对象。\n"
     "只报告真实存在的问题，不要无中生有。若无问题，issues 数组返回空即可。\n"
-    "校对结果仅供提交者参考自行修改，不会被自动应用。"
 )
 
 
@@ -93,36 +100,43 @@ STRUCTURE_SYSTEM_PROMPT = (
     "输出格式：{\"paragraphs\": [{\"paragraph_index\": 0, \"role\": \"h1\", \"confidence\": 0.95, \"reason\": \"含第X章\"}, ...]}"
 )
 
-
 # ---------------------------------------------------------------------------
-# 页面类型分类 Prompt（ingest 阶段：识别封面/目录等特殊页，排版时跳过）
+# 正文范围识别 Prompt（用于插入 {body} 和 {/body}）
 # ---------------------------------------------------------------------------
 
-PAGE_CLASSIFY_SYSTEM_PROMPT = (
-    "你是一个专业的文档页面类型识别专家。\n"
-    "你的任务是：扫描文档开头的段落，判断每个段落属于哪种页面区域类型。\n\n"
-    "页面区域类型（page_type）说明：\n"
-    "  skip: 特殊页面，排版时应完整跳过，不修改格式。包括：\n"
-    "         - 封面（cover）：文档最开头，含标题、作者、单位、日期等信息\n"
-    "         - 目录页（toc）：含章节名和页码的导航目录\n"
-    "         - 版权声明 / 法律声明页\n"
-    "         - 任务书 / 审批表等表格式前置页\n"
-    "  format: 需要正常排版的内容。包括：\n"
-    "         - 摘要页（abstract/keyword）\n"
-    "         - 正文章节（标题+正文段落）\n"
-    "         - 参考文献\n"
-    "         - 附录\n\n"
-    "判断原则：\n"
-    "  1. 封面判断：文档最开头，段落很短（通常<30字），含\"报告\"\"论文\"\"课程\"\"设计\"\"姓名\"\"学号\"\"日期\"等字眼，或纯空行。\n"
-    "  2. 目录判断：段落包含导引点（......）后接数字，或含\"目录\"\"Contents\"标题，或使用 toc 样式。\n"
-    "  3. 遇到第一个明确的正文章节标题（如\"第一章\"\"1 绪论\"\"摘要\"）后，后续内容均视为 format。\n"
-    "  4. 宁可少 skip，不要误 skip 正文内容。\n\n"
-    "你必须严格按照 JSON 输出，不得包含任何额外说明。\n"
-    "输出格式：\n"
-    "{\"page_regions\": [{\"paragraph_index\": 0, \"page_type\": \"skip\", \"region\": \"cover\", \"reason\": \"封面标题\"}, ...]}\n"
-    "其中 region 可选值：cover / toc / skip_other / format（当 page_type=format 时 region 填 format）"
+BODY_RANGE_SYSTEM_PROMPT = (
+    "你是一个文档结构分析专家。你的任务是分析一段文档内容，并确定其中“正文（Body）”部分的开始和结束位置。\n"
+    "正文部分通常不包含：封面、目录、摘要、关键词、课程要求等前置页面。\n\n"
+    "你的任务是：\n"
+    "  1. 识别正文开始的段落序号（start_index）。这通常是第一章的标题所在的序号，或者是正文段落开始的地方。\n"
+    "  2. 识别正文结束的段落序号（end_index）。通常是最后一个正文段落或参考文献前的段落。\n\n"
+    "你必须严格按照 JSON Schema 输出，不得包含任何额外说明文字。\n"
+    "输出格式：{\"start_index\": 12, \"end_index\": 150, \"reason\": \"从第一章开始，到结论结束\"}"
 )
 
+
+def build_body_range_prompt(paragraphs: List[str]) -> str:
+    """
+    构造正文范围识别用户 Prompt。仅取前 100 段和后 50 段进行分析，节省 token。
+    """
+    n = len(paragraphs)
+    lines = []
+    # 如果段落太多，只取开头和结尾部分
+    if n > 150:
+        for i in range(100):
+            lines.append(f"  序号{i}: \"{paragraphs[i][:150]}\"")
+        lines.append("  ...... (中间省略) ......")
+        for i in range(n - 50, n):
+            lines.append(f"  序号{i}: \"{paragraphs[i][:150]}\"")
+    else:
+        for i, text in enumerate(paragraphs):
+            lines.append(f"  序号{i}: \"{text[:150]}\"")
+
+    return (
+        f"请根据以下文档段落分析其正文部分的起止位置（文档共 {n} 个段落）：\n\n"
+        + "\n".join(lines) +
+        "\n\n请输出符合 Schema 的 JSON。"
+    )
 
 # ---------------------------------------------------------------------------
 # Phase 3: 视觉审查 Prompt（多模态 LLM 审查排版效果）
