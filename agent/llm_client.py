@@ -27,6 +27,7 @@ from config import (
 from agent.prompt_templates import (
     PROOFREAD_SYSTEM_PROMPT, build_proofread_prompt,
     STRUCTURE_SYSTEM_PROMPT,
+    PAGE_CLASSIFY_SYSTEM_PROMPT,
 )
 from agent.schema import DocumentProofread, ProofreadIssue, DocumentStructureAnalysis, ParagraphRole
 
@@ -269,6 +270,57 @@ class LLMClient:
             raise LLMCallError(f"结构分析响应结构校验失败: {e}", error_type="format_error") from e
         except Exception as e:
             raise LLMCallError(f"结构分析调用失败: {e}", error_type="unknown") from e
+
+    def call_page_classification(
+        self,
+        paragraphs: List[str],
+        scan_limit: int = 80,
+    ) -> dict:
+        """
+        扫描文档开头段落，让 LLM 判断哪些属于需要跳过排版的特殊页面（封面/目录等）。
+
+        :param paragraphs: 全部段落文本列表
+        :param scan_limit: 只扫描前 N 个段落（默认 80），节省 token
+        :return: {paragraph_index: region}，仅包含 page_type=="skip" 的段落
+                 region 可为 "cover" / "toc" / "skip_other"
+        """
+        # 只扫描开头若干段落，超过后强制截断（特殊页面都在文档开头）
+        indices_to_scan = list(range(min(scan_limit, len(paragraphs))))
+        n = len(indices_to_scan)
+        if n == 0:
+            return {}
+
+        lines = "\n".join(
+            f"  序号{i}: \"{paragraphs[i][:150]}{'...' if len(paragraphs[i]) > 150 else ''}\""
+            for i in indices_to_scan
+        )
+        user_prompt = (
+            f"请对以下文档开头的 {n} 个段落进行页面类型识别：\n\n"
+            f"{lines}\n\n"
+            "请输出符合要求的 JSON，仅包含 page_regions 字段。"
+        )
+        messages = [
+            {"role": "system", "content": PAGE_CLASSIFY_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        try:
+            raw = self._execute_chat_completion(messages, timeout=compute_dynamic_timeout(n))
+            data = json.loads(self._normalize_json_text(raw))
+            skip_map: dict = {}
+            for item in data.get("page_regions", []):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("page_type") != "skip":
+                    continue
+                pidx = item.get("paragraph_index")
+                region = item.get("region", "skip_other")
+                if isinstance(pidx, int) and region in {"cover", "toc", "skip_other"}:
+                    skip_map[pidx] = region
+            return skip_map
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"[page_classify] LLM 页面分类失败，跳过: {e}")
+            return {}
 
     @staticmethod
     async def call_vision_audit(image_path: str,

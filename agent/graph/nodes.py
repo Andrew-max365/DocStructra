@@ -8,13 +8,65 @@ from agent.graph.react_schemas import Action, ActionPlan, Observation, GraphStat
 def ingest_node(state: GraphState) -> dict:
     from core.parser import parse_docx_to_blocks
     from core.judge import rule_based_labels
+    from core.docx_utils import iter_all_paragraphs
+    import logging
+
+    logger = logging.getLogger(__name__)
 
     doc, blocks = parse_docx_to_blocks(state["input_path"])
     # 极速第一步：打上纯规则标签
     labels = rule_based_labels(blocks, doc=doc)
     labels["_source"] = "unified_workflow"
 
-    return {"doc": doc, "blocks": blocks, "labels": labels}
+    # ── LLM 页面分类：识别封面/目录等特殊页面，更新 labels ──
+    special_page_indices: List[int] = []
+    special_page_region_map: Dict[str, str] = {}
+
+    try:
+        from agent.llm_client import LLMClient, LLMCallError
+
+        all_paragraphs = [p.text for p in iter_all_paragraphs(doc)]
+        # 只扫描开头 80 段（特殊页面均在文档开头）
+        client = LLMClient()
+        skip_map = client.call_page_classification(all_paragraphs, scan_limit=80)
+
+        if skip_map:
+            # 构建 paragraph_index → block 的映射，便于找到对应 block_id
+            index_to_block = {b.paragraph_index: b for b in blocks}
+
+            # region → labels 角色映射
+            _region_to_role = {
+                "cover": "cover",
+                "toc": "toc",
+                "skip_other": "cover",   # 其他特殊页暂时归为 cover（排版时同样跳过）
+            }
+
+            for pidx, region in skip_map.items():
+                b = index_to_block.get(pidx)
+                if b is None:
+                    continue
+                role = _region_to_role.get(region, "cover")
+                labels[b.block_id] = role
+                special_page_indices.append(pidx)
+                special_page_region_map[pidx] = region
+
+            special_page_indices.sort()
+            logger.info(
+                f"[page_classify] LLM 识别到 {len(skip_map)} 个特殊页面段落，"
+                f"已标记为跳过: {dict(list(skip_map.items())[:10])}"
+            )
+
+    except Exception as e:
+        # LLM 页面分类失败不影响主流程，静默降级到纯规则模式
+        logger.warning(f"[page_classify] 页面分类异常（已降级为纯规则模式）: {e}")
+
+    return {
+        "doc": doc,
+        "blocks": blocks,
+        "labels": labels,
+        "special_page_indices": special_page_indices,
+        "special_page_region_map": special_page_region_map,
+    }
 
 
 def trigger_node(state: GraphState) -> dict:

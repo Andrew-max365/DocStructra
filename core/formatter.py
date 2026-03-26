@@ -664,14 +664,28 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     # section-aware role overrides: cover/toc/requirement
     section_role_by_elem = _detect_section_role(orig_paras, detect_role)
 
+    # 需要被跳过排版的特殊角色集合
+    _SKIP_ROLES = {"cover", "toc", "requirement", "reference"}
+
     def get_effective_role(p: Paragraph) -> str:
+        # 1. section 状态机结果优先（基于文档结构流的上下文推断）
         sec_role = section_role_by_elem.get(p._p)
         if sec_role:
             return sec_role
+
+        # 2. LLM 写入 labels 的标签（含 LLM 页面分类结果 cover/toc 等）
+        #    必须在 detect_role 之前检查，否则 LLM 的 cover/toc 标注永远不生效
+        llm_role = label_by_elem.get(p._p)
+        if llm_role:
+            return llm_role
+
+        # 3. detect_role 识别出的特殊角色（pattern/style 匹配）
         detected = detect_role(p)
-        if detected in {"cover", "toc", "requirement", "reference"}:
+        if detected in _SKIP_ROLES:
             return detected
-        return get_role(p)
+
+        # 4. detect_role 结果（通用 body/h1/h2 等）
+        return detected
 
     # ====== Report（诊断/动作统计/可解释输出）======
     label_source = labels.get("_source", "unknown")
@@ -847,9 +861,9 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
         if role in ("h1", "h2", "h3", "caption"):
             _strip_trailing_newlines_in_paragraph(p)
 
-        if role == "cover":
-            # 封面跳过排版，保留原始格式
-            formatted_counter["cover_skipped"] += 1
+        if role in ("cover", "toc", "requirement"):
+            # 特殊页面区域：封面/目录/课程要求等跳过排版，保留原始格式
+            formatted_counter[f"{role}_skipped"] += 1
 
         elif role == "body":
             _apply_paragraph_common(p, body_line_spacing, body_before, body_after)
