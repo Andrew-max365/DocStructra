@@ -293,7 +293,7 @@ def _build_body_scope_from_sentinel(paragraphs: List[Paragraph]):
             if tok == "{/body}":
                 active = False
             else:
-                active = not active
+                active = True
 
         stripped = RE_BODY_SENTINEL.sub("", text).strip()
         has_open = any(tok == "{body}" for tok in tokens)
