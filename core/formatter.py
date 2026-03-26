@@ -66,6 +66,7 @@ RE_BODY_LIST_NUM_DOT = re.compile(r"^\s*\d+\.\s")                 # 1. 2. 3. (si
 RE_MULTILINE_NUM = re.compile(r"\n\s*\d+(?:\.\d+)*\.?\s+")
 RE_MULTILINE_SUB = re.compile(r"\n\s*（[一二三四五六七八九十]+）")
 RE_SOFT_LINEBREAK = re.compile(r"[\n\r\v]")
+RE_BODY_SENTINEL = re.compile(r"\{/?body\}", re.IGNORECASE)
 
 # 表格单元格内联列表分隔符：匹配 ；或 ; 后紧跟列表标记（用于把 "1)项一；2)项二" 拆成独立段落）
 _RE_INLINE_LIST_SEP = re.compile(
@@ -272,6 +273,39 @@ def _insert_paragraph_after(p, text: str):
     new_para = Paragraph(new_p, p._parent)
     new_para.add_run(text)
     return new_para
+
+
+def _build_body_scope_from_sentinel(paragraphs: List[Paragraph]):
+    has_sentinel = False
+    in_body_by_elem: Dict = {}
+    marker_para_elems: Set = set()
+    active = False
+
+    for p in paragraphs:
+        text = p.text or ""
+        tokens = [m.group(0).lower() for m in RE_BODY_SENTINEL.finditer(text)]
+        if tokens:
+            has_sentinel = True
+            marker_para_elems.add(p._p)
+
+        pre_active = active
+        for tok in tokens:
+            if tok == "{/body}":
+                active = False
+            else:
+                active = not active
+
+        stripped = RE_BODY_SENTINEL.sub("", text).strip()
+        has_open = any(tok == "{body}" for tok in tokens)
+        if stripped and (pre_active or active or has_open):
+            in_body_by_elem[p._p] = True
+
+        if tokens:
+            for run in iter_paragraph_runs(p):
+                if run.text:
+                    run.text = RE_BODY_SENTINEL.sub("", run.text)
+
+    return has_sentinel, in_body_by_elem, marker_para_elems
 
 
 # =========================
@@ -647,6 +681,7 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
     # 因为每次调用 iter_all_paragraphs 都会创建新的 Paragraph 包装对象，
     # 若用对象本身做 key 会导致 label_by_elem 查找永远失败。
     orig_paras = list(iter_all_paragraphs(doc))
+    has_body_sentinel, in_body_by_elem, marker_para_elems = _build_body_scope_from_sentinel(orig_paras)
     para_by_index = {i: p for i, p in enumerate(orig_paras)}
     label_by_elem: Dict = {}  # CT_P element -> role str
 
@@ -659,12 +694,16 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
             label_by_elem[p._p] = role
 
     def get_role(p: Paragraph) -> str:
+        if has_body_sentinel and not in_body_by_elem.get(p._p, False):
+            return "cover"
         return label_by_elem.get(p._p) or detect_role(p)
 
     # section-aware role overrides: cover/toc/requirement
     section_role_by_elem = _detect_section_role(orig_paras, detect_role)
 
     def get_effective_role(p: Paragraph) -> str:
+        if has_body_sentinel and not in_body_by_elem.get(p._p, False):
+            return "cover"
         sec_role = section_role_by_elem.get(p._p)
         if sec_role:
             return sec_role
@@ -698,6 +737,8 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
             continue
         lab = labels.get(b.block_id)
         if not lab or lab == "blank":
+            continue
+        if has_body_sentinel and (p._p in marker_para_elems or not in_body_by_elem.get(p._p, False)):
             continue
         # Skip multi-line numbered blocks: detect_role returns 'body' as a
         # conservative safety measure (to avoid heading mis-classification), not
@@ -754,6 +795,9 @@ def apply_formatting(doc, blocks: List[Block], labels: Dict[int, str], spec: Spe
         "formatted": {"counts": {}},
         "warnings": [],
     }
+    report["actions"]["body_sentinel_enabled"] = has_body_sentinel
+    if has_body_sentinel:
+        report["actions"]["body_sentinel_scoped_paragraphs"] = sum(1 for p in orig_paras if in_body_by_elem.get(p._p, False))
     # 0) 页面级排版（section）
     page_sections_changed = _apply_page_layout(doc, page_cfg)
     report["actions"]["page_sections_changed"] = page_sections_changed
