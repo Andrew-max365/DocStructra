@@ -18,6 +18,7 @@ HYBRID_TRIGGER_HEADING_LEN = 30
 HYBRID_TRIGGER_CONSECUTIVE_BODY_MIN = 3
 # 连续 body 段落中认定为"短"的字符数上限
 HYBRID_TRIGGER_SHORT_BODY_CHARS = 60
+SPECIAL_PAGE_ROLES = {"cover", "toc", "requirement"}
 
 
 def _compute_hybrid_triggers(blocks, rule_labels: Dict) -> Dict:
@@ -105,6 +106,21 @@ def _compute_hybrid_triggers(blocks, rule_labels: Dict) -> Dict:
     }
 
 
+def _collect_special_page_candidates(blocks, rule_labels: Dict) -> Set[int]:
+    """
+    收集“疑似特殊页面”段落索引，供 LLM 做结构复核。
+
+    当前策略：
+    - 规则层已判定为 cover/toc/requirement 的段落，统一进入 LLM 复核；
+    - 仅输出 paragraph_index 集合，不改变规则标签。
+    """
+    return {
+        b.paragraph_index
+        for b in blocks
+        if rule_labels.get(b.block_id) in SPECIAL_PAGE_ROLES
+    }
+
+
 class ModeRouter:
     """
     hybrid 模式路由器：规则负责全部排版，仅当触发条件命中时 LLM 对触发段落做校对。
@@ -158,8 +174,12 @@ class ModeRouter:
         """
         from core.judge import SmartJudge
 
-        # 步骤 1: 计算触发条件
+        # 步骤 1: 计算触发条件 + 特殊页面候选
         trigger_info = _compute_hybrid_triggers(blocks, rule_labels)
+        special_candidates = _collect_special_page_candidates(blocks, rule_labels)
+        structure_analysis_indices = sorted(
+            set(trigger_info["triggered_indices"]) | set(special_candidates)
+        )
 
         # 排版标签先完全来自规则
         result: Dict = {}
@@ -171,13 +191,15 @@ class ModeRouter:
             "triggered": trigger_info["triggered"],
             "reasons": trigger_info["reasons"],
             "triggered_paragraph_count": len(trigger_info["triggered_indices"]),
+            "special_page_candidate_count": len(special_candidates),
             "total_paragraph_count": len(blocks),
             "metrics": trigger_info["metrics"],
         }
 
-        if not trigger_info["triggered"]:
-            # 无触发：完全使用规则结果，不调用 LLM
+        if not structure_analysis_indices:
+            # 无触发、无特殊页面候选：完全使用规则结果，不调用 LLM
             result["_hybrid_triggers"]["llm_called"] = False
+            result["_hybrid_triggers"]["special_page_llm_called"] = False
             return result
 
         # 步骤 2: 提取段落文本
@@ -189,7 +211,7 @@ class ModeRouter:
         try:
             structure_analysis = self.analyzer.client.call_structure_analysis(
                 paragraphs=all_paragraphs,
-                paragraph_indices=triggered_indices,
+                paragraph_indices=structure_analysis_indices,
             )
             # 建立 paragraph_index → LLM结果 的快速查找表
             llm_by_index: Dict[int, dict] = {
@@ -198,7 +220,7 @@ class ModeRouter:
             }
             # 对触发段落进行仲裁：找到对应 block
             index_to_block = {b.paragraph_index: b for b in blocks}
-            for pidx in triggered_indices:
+            for pidx in structure_analysis_indices:
                 b = index_to_block.get(pidx)
                 if b is None:
                     continue
@@ -213,12 +235,19 @@ class ModeRouter:
                     result[b.block_id] = final_role
 
             result["_hybrid_triggers"]["structure_analysis_applied"] = True
+            result["_hybrid_triggers"]["special_page_llm_called"] = bool(special_candidates)
         except LLMCallError as e:
             result.setdefault("_warnings", [])
             result["_warnings"].append(
                 f"hybrid 模式结构分析失败，已保留规则结果: {e}"
             )
             result["_hybrid_triggers"]["structure_analysis_applied"] = False
+            result["_hybrid_triggers"]["special_page_llm_called"] = False
+
+        if not trigger_info["triggered"]:
+            # 仅做了特殊页面识别，不做校对
+            result["_hybrid_triggers"]["llm_called"] = False
+            return result
 
         # 步骤 3b: 校对（不影响标签）
         try:

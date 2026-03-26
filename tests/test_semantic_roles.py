@@ -137,3 +137,32 @@ def test_detect_role_toc_and_requirement():
     p_req = doc.add_paragraph("课程要求")
     assert detect_role(p_toc) == "toc"
     assert detect_role(p_req) == "requirement"
+
+
+def test_cover_page_keeps_original_indentation_when_skipped():
+    """cover 页应跳过排版，保留原始首行缩进。"""
+    from docx.shared import Pt
+
+    spec = load_spec(str(SPECS_DIR / "default.yaml"))
+    doc = Document()
+    p_cover = doc.add_paragraph("课程设计报告")
+    p_cover.paragraph_format.first_line_indent = Pt(36)
+    p_body = doc.add_paragraph("这是正文段落内容。")
+
+    from core.docx_utils import iter_all_paragraphs
+    from core.parser import Block
+
+    blocks = [
+        Block(block_id=i + 1, kind="paragraph", text=p.text, paragraph_index=i)
+        for i, p in enumerate(iter_all_paragraphs(doc))
+    ]
+    labels = {
+        blocks[0].block_id: "cover",
+        blocks[1].block_id: "body",
+        "_source": "test",
+    }
+
+    report = apply_formatting(doc, blocks, labels, spec)
+    counts = report["formatted"]["counts"]
+    assert counts.get("cover_skipped", 0) == 1
+    assert abs((p_cover.paragraph_format.first_line_indent.pt or 0) - 36.0) < 0.1

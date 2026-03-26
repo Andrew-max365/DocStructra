@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from agent.mode_router import (
     ModeRouter,
     _compute_hybrid_triggers,
+    _collect_special_page_candidates,
     HYBRID_TRIGGER_UNKNOWN_MIN,
 )
 from agent.llm_client import LLMCallError
@@ -105,6 +106,18 @@ class TestHybridTriggers:
         assert "unknown_count" in result["metrics"]
         assert "ambiguous_heading_count" in result["metrics"]
         assert result["metrics"]["unknown_count"] >= HYBRID_TRIGGER_UNKNOWN_MIN
+
+    def test_collect_special_page_candidates(self):
+        """cover/toc/requirement 应被收集为特殊页面候选。"""
+        blocks = [
+            _make_block(0, 0, "课程报告"),
+            _make_block(1, 1, "目录"),
+            _make_block(2, 2, "课程要求"),
+            _make_block(3, 3, "正文内容"),
+        ]
+        rule_labels = {0: "cover", 1: "toc", 2: "requirement", 3: "body"}
+        candidates = _collect_special_page_candidates(blocks, rule_labels)
+        assert candidates == {0, 1, 2}
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +329,50 @@ class TestHybridWithTrigger:
         for i in range(1, 5):
             assert result[i] == "body"
 
+    def test_hybrid_special_pages_structure_only_no_proofread(self):
+        """
+        仅存在特殊页面候选时，hybrid 应调用结构分析复核，但不做校对。
+        """
+        blocks = [
+            _make_block(0, 0, "课程设计报告"),
+            _make_block(1, 1, "目录"),
+            _make_block(2, 2, "课程要求"),
+            _make_block(3, 3, "第一章 引言"),
+            _make_block(4, 4, "这是一段较长正文内容，不会触发短正文连续规则。"),
+        ]
+        rule_labels = {0: "cover", 1: "toc", 2: "requirement", 3: "h1", 4: "body"}
+
+        from agent.schema import DocumentStructureAnalysis, ParagraphRole
+        mock_structure = DocumentStructureAnalysis(
+            paragraphs=[
+                ParagraphRole(paragraph_index=0, role="cover", confidence=0.95, reason="封面"),
+                ParagraphRole(paragraph_index=1, role="toc", confidence=0.95, reason="目录"),
+                ParagraphRole(paragraph_index=2, role="requirement", confidence=0.95, reason="要求"),
+            ]
+        )
+
+        router = ModeRouter(mode="hybrid")
+        mock_client = MagicMock()
+        mock_client.call_structure_analysis.return_value = mock_structure
+        mock_analyzer = MagicMock()
+        mock_analyzer.client = mock_client
+        router._analyzer = mock_analyzer
+
+        with patch.object(
+            ModeRouter,
+            "_extract_paragraphs",
+            return_value=["课程设计报告", "目录", "课程要求", "第一章 引言", "这是一段较长正文内容"],
+        ):
+            result = router.route(MagicMock(), blocks, rule_labels)
+
+        triggers = result["_hybrid_triggers"]
+        assert triggers["triggered"] is False
+        assert triggers["special_page_candidate_count"] == 3
+        assert triggers["special_page_llm_called"] is True
+        assert triggers["llm_called"] is False
+        mock_client.call_structure_analysis.assert_called_once()
+        mock_client.call_proofread.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # 5. ProofreadIssue / DocumentProofread 字段完整性
@@ -410,5 +467,4 @@ class TestLLMClientCanonicalizeProofread:
         payload = {"doc_language": "zh"}
         result = LLMClient._canonicalize_proofread_payload(payload)
         assert result["issues"] == []
-
 
