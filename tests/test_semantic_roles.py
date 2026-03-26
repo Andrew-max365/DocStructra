@@ -139,8 +139,8 @@ def test_detect_role_toc_and_requirement():
     assert detect_role(p_req) == "requirement"
 
 
-def test_cover_page_keeps_original_indentation_when_skipped():
-    """cover 页应跳过排版，保留原始首行缩进。"""
+def test_cover_page_preserves_original_indentation():
+    """cover 页会被跳过排版，应保留原始首行缩进。"""
     from docx.shared import Pt
 
     spec = load_spec(str(SPECS_DIR / "default.yaml"))

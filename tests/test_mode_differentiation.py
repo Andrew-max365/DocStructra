@@ -332,6 +332,8 @@ class TestHybridWithTrigger:
     def test_hybrid_special_pages_structure_only_no_proofread(self):
         """
         仅存在特殊页面候选时，hybrid 应调用结构分析复核，但不做校对。
+        该用例特意使用不会命中短正文连续触发条件的正文文本，
+        以验证“特殊页面识别”可独立触发结构分析。
         """
         blocks = [
             _make_block(0, 0, "课程设计报告"),
@@ -467,4 +469,3 @@ class TestLLMClientCanonicalizeProofread:
         payload = {"doc_language": "zh"}
         result = LLMClient._canonicalize_proofread_payload(payload)
         assert result["issues"] == []
-
