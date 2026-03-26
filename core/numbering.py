@@ -37,7 +37,8 @@ LIST_FMTS = ("paren_arabic", "rparen", "num_dot", "enclosed", "alpha_lower", "al
 
 # Structural roles that always break a list group (never part of a numbered list)
 _STRUCTURAL_ROLES = frozenset({
-    "h1", "h2", "h3", "caption", "abstract", "keyword", "reference", "footer"
+    "h1", "h2", "h3", "caption", "abstract", "keyword", "reference", "footer",
+    "cover", "toc", "requirement"
 })
 
 # Decimal-style formats that may be freely mixed within one list group when ordinals

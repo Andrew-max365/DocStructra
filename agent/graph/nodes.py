@@ -8,13 +8,68 @@ from agent.graph.react_schemas import Action, ActionPlan, Observation, GraphStat
 def ingest_node(state: GraphState) -> dict:
     from core.parser import parse_docx_to_blocks
     from core.judge import rule_based_labels
+    from core.docx_utils import iter_all_paragraphs
+    from docx.oxml import OxmlElement
+    from docx.text.paragraph import Paragraph
+    import logging
+
+    logger = logging.getLogger(__name__)
 
     doc, blocks = parse_docx_to_blocks(state["input_path"])
     # 极速第一步：打上纯规则标签
     labels = rule_based_labels(blocks, doc=doc)
     labels["_source"] = "unified_workflow"
 
-    return {"doc": doc, "blocks": blocks, "labels": labels}
+    # ── LLM 正文范围识别：识别正文起止，并插入 {body} 标签 ──
+    try:
+        from agent.llm_client import LLMClient
+        
+        all_paragraphs = [p.text for p in iter_all_paragraphs(doc)]
+        client = LLMClient()
+        range_res = client.call_body_range_identification(all_paragraphs)
+        
+        start_idx = range_res.get("start_index", 0)
+        end_idx = range_res.get("end_index", len(all_paragraphs) - 1)
+        
+        # 为了不破坏后续 block 的映射，我们在 doc 中插入标记段落。
+        # 注意：从后往前插入，避免前面的索引变动。
+        
+        # 插入 {/body}
+        # 如果 end_idx 是最后一段，则在最后追加；否则在 end_idx+1 段之前插
+        paragraphs_list = list(iter_all_paragraphs(doc))
+        if end_idx < len(paragraphs_list):
+            target_p = paragraphs_list[end_idx]
+            new_p = OxmlElement('w:p')
+            target_p._p.addnext(new_p)
+            new_para = Paragraph(new_p, target_p._parent)
+            new_para.add_run("{/body}")
+        
+        # 插入 {body}
+        if start_idx < len(paragraphs_list):
+            target_p = paragraphs_list[start_idx]
+            new_p = OxmlElement('w:p')
+            target_p._p.addprevious(new_p)
+            new_para = Paragraph(new_p, target_p._parent)
+            new_para.add_run("{body}")
+            
+        logger.info(f"[body_range] 识别到正文范围: {start_idx}-{end_idx}, 已插入标记")
+        
+        # 重新解析 blocks，因为我们改变了文档结构（增加了两个段落）
+        # 重新调用 parse_docx_to_blocks 有点重，但最保险
+        # 这里的 blocks 用于后续的 label 映射，需要与 doc 同步
+        _, blocks = parse_docx_to_blocks(state["input_path"], doc=doc)
+        # 重新生成 labels
+        labels = rule_based_labels(blocks, doc=doc)
+        labels["_source"] = "unified_workflow_with_body_tags"
+
+    except Exception as e:
+        logger.warning(f"[body_range] 识别正文范围失败: {e}")
+
+    return {
+        "doc": doc,
+        "blocks": blocks,
+        "labels": labels,
+    }
 
 
 def trigger_node(state: GraphState) -> dict:
