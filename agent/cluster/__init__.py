@@ -1,11 +1,11 @@
-from agent.cluster.functional_agents import (
+from agent.subagents.orchestrator.cluster.functional_agents import (
     FormattingExecutionAgent,
     HeaderFooterIntentFallbackAgent,
     IntentUnderstandingAgent,
     JsonGenerationAgent,
     TemplateRoutingAgent,
 )
-from agent.cluster.master_control_agent import MasterControlAgent
+from agent.subagents.orchestrator.cluster.master_control_agent import MasterControlAgent
 
 __all__ = [
     "MasterControlAgent",

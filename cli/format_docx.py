@@ -1,7 +1,7 @@
 import argparse
 import os
 from config import LLM_MODE
-from service.format_service import format_docx_file
+from agent.subagents.orchestrator.format_service import format_docx_file
 
 
 def main():
@@ -20,7 +20,7 @@ def main():
     args = parser.parse_args()
 
     if args.label_mode == "react":
-        from agent.graph.workflow import run_react_agent
+        from agent.subagents.orchestrator.graph.workflow import run_react_agent
         from config import REACT_MAX_ITERS
         result_state = run_react_agent(
             args.input,

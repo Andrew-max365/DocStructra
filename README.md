@@ -132,12 +132,19 @@ curl -X POST "[http://127.0.0.1:8000/v1/agent/format/bundle](http://127.0.0.1:80
 
 ```text
 MyAgent/
-├── agent/                    # Agent 核心逻辑、大模型调度与 ReAct 图
-│   └── cluster/              # Agent 集群（总控制 Agent + 功能 Agent）
+├── agent/
+│   ├── subagents/            # 子 Agent 逻辑主目录（按职责模块化）
+│   │   ├── orchestrator/     # 总控编排：工作流、集群协调、统一执行入口
+│   │   ├── ingest_parse/     # 文档读取与结构化解析
+│   │   ├── intent_route/     # 意图识别与模板/任务路由
+│   │   ├── format_act/       # 排版执行与规范应用
+│   │   └── validate_review/  # 审查、反思与质量评估
+│   ├── graph/                # 兼容导入层（重定向到 subagents）
+│   └── cluster/              # 兼容导入层（重定向到 subagents）
 ├── api/                      # FastAPI REST API 服务端
-├── core/                     # Word 文档底层读写、排版及规则引擎
+├── core/                     # 兼容导入层（重定向到 subagents）
 ├── ui/                       # 基于 Chainlit 的交互式 Web 界面
-├── service/                  # 业务逻辑与服务编排层
+├── service/                  # 兼容导入层（重定向到 orchestrator）
 ├── specs/                    # YAML 格式排版规范 (default, academic, gov 等)
 ├── tests/                    # 单元与集成测试用例
 ├── docs/                     # 附加文档说明 (如 API_USAGE.md)

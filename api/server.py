@@ -13,7 +13,7 @@ from typing import Literal
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from agent.Structura_agent import run_doc_agent_bytes
+from agent.subagents.orchestrator.structura_agent import run_doc_agent_bytes
 from config import REQUIRE_AUTH, SERVER_API_KEY
 
 logger = logging.getLogger(__name__)

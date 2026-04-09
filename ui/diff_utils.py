@@ -212,7 +212,7 @@ def apply_proofread_issues(
     if not issues:
         return 0
 
-    from core.docx_utils import iter_all_paragraphs
+    from agent.subagents.ingest_parse.docx_utils import iter_all_paragraphs
 
     excluded = excluded_numbers or set()
     paragraphs = iter_all_paragraphs(doc)
@@ -251,7 +251,7 @@ def apply_and_save_proofread(
     *excluded_numbers*), and return the modified docx bytes + count applied.
     """
     from docx import Document
-    from core.writer import save_docx
+    from agent.subagents.format_act.writer import save_docx
 
     tmp_in = tmp_out = None
     try:
@@ -461,7 +461,7 @@ def generate_redline_docx(diff_items: List[DiffItem], out_bytes: bytes) -> bytes
             with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as f:
                 f.write(out_bytes)
                 _tmp = f.name
-            from core.docx_utils import iter_all_paragraphs
+            from agent.subagents.ingest_parse.docx_utils import iter_all_paragraphs
             paragraphs = iter_all_paragraphs(Document(_tmp))
         except Exception:
             pass
