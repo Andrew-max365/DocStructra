@@ -1,5 +1,3 @@
-# format_docx.py
-
 import argparse
 import os
 from config import LLM_MODE

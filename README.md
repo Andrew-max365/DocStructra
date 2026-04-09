@@ -75,13 +75,13 @@ chainlit run ui/chainlit_app.py
 
 ```bash
 # 混合模式 (速度极快，适合日常排版)
-python format_docx.py input.docx output.docx --label-mode hybrid
+python -m cli.format_docx input.docx output.docx --label-mode hybrid
 
 # ReAct 模式 (深度自校正，适合高度混乱文档)
-python format_docx.py input.docx output.docx --label-mode react
+python -m cli.format_docx input.docx output.docx --label-mode react
 
 # 指定专项模板
-python format_docx.py input.docx output.docx --label-mode hybrid --spec specs/gov.yaml
+python -m cli.format_docx input.docx output.docx --label-mode hybrid --spec specs/gov.yaml
 ```
 
 ---
@@ -141,8 +141,10 @@ MyAgent/
 ├── specs/                    # YAML 格式排版规范 (default, academic, gov 等)
 ├── tests/                    # 单元与集成测试用例
 ├── docs/                     # 附加文档说明 (如 API_USAGE.md)
-├── config.py                 # 全局配置管理 (对接 key.env)
-├── format_docx.py            # CLI 命令行入口
+├── config/                   # 全局配置管理 (对接 key.env)
+│   └── __init__.py
+├── cli/                      # CLI 命令行入口
+│   └── format_docx.py
 ├── chainlit.md               # Chainlit 欢迎页面 Markdown
 └── pyproject.toml            # Python 项目元数据
 ```
