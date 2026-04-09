@@ -21,7 +21,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
-from agent.subagents.ingest_parse.docx_utils import set_run_fonts, iter_paragraph_runs
+from agent.subagents.ingest_parse.api import set_run_fonts, iter_paragraph_runs
 
 
 # ─────────────────────────────────────────────────────────────────────────────

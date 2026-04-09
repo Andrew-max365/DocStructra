@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from agent.subagents.format_act.spec import Spec
+from agent.subagents.format_act.api import Spec
 
 
 # ---------------------------------------------------------------------------

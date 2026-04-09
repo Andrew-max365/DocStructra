@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from docx import Document
 
-from agent.subagents.ingest_parse.docx_utils import iter_paragraph_runs as _iter_para_runs
+from agent.subagents.ingest_parse.api import iter_paragraph_runs as _iter_para_runs
 
 _FONT_SIZE_TOLERANCE_PT = 0.5   # 字号比较容差（pt）
 _MAJORITY_THRESHOLD = 0.5        # 视为"多数"的最低占比
@@ -109,7 +109,7 @@ def audit_document(
     :param labels: rule_based_labels / route 返回的 labels 字典（可选）
     :return:       AuditIssue 列表（按严重程度排序）
     """
-    from agent.subagents.ingest_parse.docx_utils import iter_all_paragraphs
+    from agent.subagents.ingest_parse.api import iter_all_paragraphs
 
     issues: List[AuditIssue] = []
     paragraphs = iter_all_paragraphs(doc)
@@ -133,7 +133,7 @@ def audit_document(
 
         if role is None:
             try:
-                from agent.subagents.format_act.formatter import detect_role
+                from agent.subagents.format_act.api import detect_role
                 role = detect_role(p)
             except Exception:
                 role = "body"

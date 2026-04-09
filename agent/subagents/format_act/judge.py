@@ -3,8 +3,8 @@ import re
 import warnings
 from typing import Dict, List
 
-from agent.subagents.ingest_parse.parser import Block
-from agent.subagents.ingest_parse.docx_utils import iter_all_paragraphs
+from agent.subagents.ingest_parse.api import Block
+from agent.subagents.ingest_parse.api import iter_all_paragraphs
 
 # 兼容：无 doc 情况下的简易规则（保留）
 RE_H1 = re.compile(r"^\s*第[一二三四五六七八九十百千0-9]+章")
