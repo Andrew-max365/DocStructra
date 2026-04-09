@@ -1,4 +1,4 @@
-# agent/prompt_templates.py
+# agent/subagents/validate_review/prompt_templates.py
 # Prompt 模板管理：系统 Prompt 和用户 Prompt 模板
 from typing import List, Optional
 

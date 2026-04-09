@@ -1,13 +1,13 @@
-# agent/mode_router.py
+# agent/subagents/validate_review/mode_router.py
 # 根据 LLM_MODE 环境变量，将文档分析请求路由到不同的处理逻辑
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Set
 
 from config import LLM_MODE
-from agent.doc_analyzer import DocAnalyzer
-from agent.llm_client import LLMCallError
-from agent.schema import DocumentProofread
+from agent.subagents.validate_review.doc_analyzer import DocAnalyzer
+from agent.subagents.validate_review.llm_client import LLMCallError
+from agent.subagents.validate_review.schema import DocumentProofread
 
 # hybrid 触发条件阈值
 # 规则标为 unknown 的段落数阈值（≥1 即触发）
@@ -172,7 +172,7 @@ class ModeRouter:
            b. 校对（call_proofread）→ 提供给提交者自行修改的建议
         4. 在 _hybrid_triggers 中记录触发原因与指标
         """
-        from core.judge import SmartJudge
+        from agent.subagents.format_act.judge import SmartJudge
 
         # 步骤 1: 计算触发条件 + 特殊页面候选
         trigger_info = _compute_hybrid_triggers(blocks, rule_labels)
@@ -276,5 +276,5 @@ class ModeRouter:
     @staticmethod
     def _extract_paragraphs(doc) -> List[str]:
         """从 doc 提取所有段落文本（含表格段落），保持索引一致。"""
-        from core.docx_utils import iter_all_paragraphs
+        from agent.subagents.ingest_parse.docx_utils import iter_all_paragraphs
         return [p.text for p in iter_all_paragraphs(doc)]

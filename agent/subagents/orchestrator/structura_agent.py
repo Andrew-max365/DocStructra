@@ -1,4 +1,4 @@
-# agent/Structura_agent.py
+# agent/subagents/orchestrator/structura_agent.py
 """
 DocAgent: 文档质量检查 + 自动修复（排版）智能体
 
@@ -22,9 +22,10 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
-from agent.cluster import FormattingExecutionAgent, MasterControlAgent
+from agent.subagents.orchestrator.cluster.functional_agents import FormattingExecutionAgent
+from agent.subagents.orchestrator.cluster.master_control_agent import MasterControlAgent
 from config import LLM_MODE
-from service.format_service import format_docx_file, format_docx_bytes
+from agent.subagents.orchestrator.format_service import format_docx_file, format_docx_bytes
 
 _FORMATTING_COORDINATOR = MasterControlAgent(
     formatting_agent=FormattingExecutionAgent(

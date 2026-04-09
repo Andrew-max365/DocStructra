@@ -18,8 +18,8 @@ from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_LINE_SPACING, WD_ALIGN_PARAGRAPH
 
-from core.docx_utils import iter_paragraph_runs, iter_all_paragraphs, set_run_fonts
-from core.formatter import detect_role
+from agent.subagents.ingest_parse.docx_utils import iter_paragraph_runs, iter_all_paragraphs, set_run_fonts
+from agent.subagents.format_act.formatter import detect_role
 
 _EMU_PER_PT = 12700  # EMU（English Metric Units）每磅的转换系数
 

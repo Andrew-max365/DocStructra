@@ -14,8 +14,8 @@ from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_LINE_SPACING, WD_ALIGN_PARAGRAPH, WD_BREAK
 
-from core.docx_utils import iter_paragraph_runs, iter_all_paragraphs, set_run_fonts
-from core.formatter import detect_role
+from agent.subagents.ingest_parse.docx_utils import iter_paragraph_runs, iter_all_paragraphs, set_run_fonts
+from agent.subagents.format_act.formatter import detect_role
 
 _DEFAULT_FONT_SIZE_PT = 12.0  # 默认正文字号（pt）
 
@@ -274,7 +274,7 @@ def apply_partial_format(
     report["applied"] = {k: True for k in overrides.keys()}
     # 清理标记段落并插入分页符
     final_paras = list(iter_all_paragraphs(doc))
-    from core.docx_utils import delete_paragraph
+    from agent.subagents.ingest_parse.docx_utils import delete_paragraph
     for p in final_paras:
         try:
             t = (p.text or "").strip()

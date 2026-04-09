@@ -1,4 +1,4 @@
-# agent/visual_reviewer.py
+# agent/subagents/validate_review/visual_reviewer.py
 """
 Phase 3: 多模态视觉审查模块
 
@@ -40,8 +40,8 @@ from config import (
     VISUAL_REVIEW_DPI,
     LIBREOFFICE_PATH,
 )
-from agent.prompt_templates import VISUAL_REVIEW_SYSTEM_PROMPT, build_visual_review_prompt
-from agent.schema import VisualReviewResult, VisualIssue
+from agent.subagents.validate_review.prompt_templates import VISUAL_REVIEW_SYSTEM_PROMPT, build_visual_review_prompt
+from agent.subagents.validate_review.schema import VisualReviewResult, VisualIssue
 
 logger = logging.getLogger(__name__)
 

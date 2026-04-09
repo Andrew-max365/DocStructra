@@ -1,4 +1,4 @@
-# core/parser.py
+# agent/subagents/ingest_parse/parser.py
 from dataclasses import dataclass
 from typing import List, Tuple
 from docx import Document

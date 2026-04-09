@@ -1,6 +1,2 @@
 """Compatibility wrapper for migrated module."""
-from pathlib import Path
-
-_TARGET = Path(__file__).resolve().parent / "subagents" / "intent_route" / "template_router.py"
-_CODE = _TARGET.read_text(encoding="utf-8")
-exec(compile(_CODE, str(_TARGET), "exec"), globals(), globals())
+from agent.subagents.intent_route.template_router import *  # noqa: F401,F403

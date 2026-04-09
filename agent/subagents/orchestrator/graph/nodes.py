@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Set
-from agent.graph.react_schemas import Action, ActionPlan, Observation, GraphState
+from agent.subagents.orchestrator.graph.react_schemas import Action, ActionPlan, Observation, GraphState
 
 
 def ingest_node(state: GraphState) -> dict:
-    from core.parser import parse_docx_to_blocks
-    from core.judge import rule_based_labels
-    from core.docx_utils import iter_all_paragraphs
+    from agent.subagents.ingest_parse.parser import parse_docx_to_blocks
+    from agent.subagents.format_act.judge import rule_based_labels
+    from agent.subagents.ingest_parse.docx_utils import iter_all_paragraphs
     from docx.oxml import OxmlElement
     from docx.text.paragraph import Paragraph
     import logging
@@ -22,7 +22,7 @@ def ingest_node(state: GraphState) -> dict:
 
     # ── LLM 正文范围识别：识别正文起止，并插入 {body} 标签 ──
     try:
-        from agent.llm_client import LLMClient
+        from agent.subagents.validate_review.llm_client import LLMClient
         
         all_paragraphs = [p.text for p in iter_all_paragraphs(doc)]
         client = LLMClient()
@@ -115,7 +115,7 @@ def trigger_node(state: GraphState) -> dict:
     # 触发条件5：字号极其不统一 (异常波动)
     # 若同一角色的段落存在 >3 种不同的字号，可能是直接复制粘贴导致格式紊乱
     role_sizes = {}
-    from core.docx_utils import iter_all_paragraphs
+    from agent.subagents.ingest_parse.docx_utils import iter_all_paragraphs
     doc_paragraphs = list(iter_all_paragraphs(state["doc"]))
     
     for b in blocks:
@@ -156,9 +156,9 @@ def trigger_node(state: GraphState) -> dict:
 
 def reason_node(state: GraphState) -> dict:
     """大模型思考节点：仅处理被雷达标记的段落，并收集文字校对建议"""
-    from agent.llm_client import LLMClient
-    from core.judge import SmartJudge
-    from core.docx_utils import iter_all_paragraphs
+    from agent.subagents.validate_review.llm_client import LLMClient
+    from agent.subagents.format_act.judge import SmartJudge
+    from agent.subagents.ingest_parse.docx_utils import iter_all_paragraphs
     import traceback
 
     iteration = state["current_iter"] + 1
@@ -249,9 +249,9 @@ def act_node(state: GraphState) -> dict:
 
 
 def validate_node(state: GraphState) -> dict:
-    from core.formatter import apply_formatting
-    from core.writer import save_docx
-    from core.spec import load_spec
+    from agent.subagents.format_act.formatter import apply_formatting
+    from agent.subagents.format_act.writer import save_docx
+    from agent.subagents.format_act.spec import load_spec
 
     doc = state["doc"]
     blocks = state["blocks"]
@@ -320,11 +320,11 @@ def reflect_node(state: GraphState) -> dict:
     import asyncio
     import tempfile
     import shutil
-    from agent.llm_client import LLMClient
-    from core.spec import load_spec
-    from agent.spec_summarizer import summarize_spec
+    from agent.subagents.validate_review.llm_client import LLMClient
+    from agent.subagents.format_act.spec import load_spec
+    from agent.subagents.validate_review.spec_summarizer import summarize_spec
     from config import REFLECTION_MAX_ITERS
-    from agent.visual_reviewer import docx_to_pdf, pdf_to_images
+    from agent.subagents.validate_review.visual_reviewer import docx_to_pdf, pdf_to_images
 
     # 1. --- 完美保留你原有的状态获取 ---
     output_path = state["output_path"]

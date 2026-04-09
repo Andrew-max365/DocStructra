@@ -1,4 +1,4 @@
-# core/writer.py
+# agent/subagents/format_act/writer.py
 from docx.document import Document as DocxDocument
 
 def save_docx(doc: DocxDocument, output_path: str) -> None:

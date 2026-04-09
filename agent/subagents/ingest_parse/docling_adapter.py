@@ -95,7 +95,7 @@ def parse_with_fallback(file_path: str, use_docling: bool = False):
     主入口：优先使用 Docling（如果 use_docling=True），失败自动回退原 parser。
     始终返回 (doc, blocks) 元组，与 parse_docx_to_blocks 兼容。
     """
-    from core.parser import parse_docx_to_blocks
+    from agent.subagents.ingest_parse.parser import parse_docx_to_blocks
 
     if use_docling and DOCLING_AVAILABLE:
         try:

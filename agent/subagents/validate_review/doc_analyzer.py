@@ -1,10 +1,10 @@
-# agent/doc_analyzer.py
+# agent/subagents/validate_review/doc_analyzer.py
 # 文档结构分析 Agent：封装 LLMClient 的懒加载构造，供 ModeRouter 使用
 from __future__ import annotations
 
 from typing import Optional
 
-from agent.llm_client import LLMClient
+from agent.subagents.validate_review.llm_client import LLMClient
 
 
 class DocAnalyzer:

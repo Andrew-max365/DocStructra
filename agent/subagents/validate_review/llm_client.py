@@ -1,4 +1,4 @@
-# agent/llm_client.py
+# agent/subagents/validate_review/llm_client.py
 # 封装对大模型 API 的调用（使用 openai SDK）
 from __future__ import annotations
 import base64
@@ -24,12 +24,12 @@ from config import (
     VISION_BASE_URL,
     VISION_MODEL,
 )
-from agent.prompt_templates import (
+from agent.subagents.validate_review.prompt_templates import (
     PROOFREAD_SYSTEM_PROMPT, build_proofread_prompt,
     STRUCTURE_SYSTEM_PROMPT,
     BODY_RANGE_SYSTEM_PROMPT, build_body_range_prompt,
 )
-from agent.schema import DocumentProofread, ProofreadIssue, DocumentStructureAnalysis, ParagraphRole
+from agent.subagents.validate_review.schema import DocumentProofread, ProofreadIssue, DocumentStructureAnalysis, ParagraphRole
 
 
 def compute_dynamic_timeout(n_paragraphs: int) -> int:

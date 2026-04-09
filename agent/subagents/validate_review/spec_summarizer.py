@@ -1,4 +1,4 @@
-# agent/spec_summarizer.py
+# agent/subagents/validate_review/spec_summarizer.py
 """
 Spec 智能摘要器：将 YAML 排版规范自动提炼为自然语言，
 供视觉审查的多模态 LLM 理解"应该按什么标准打分"。
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from core.spec import Spec
+from agent.subagents.format_act.spec import Spec
 
 
 # ---------------------------------------------------------------------------

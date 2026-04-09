@@ -1,4 +1,4 @@
-# agent/schema.py
+# agent/subagents/validate_review/schema.py
 # 使用 pydantic 定义结构化输出 Schema，供 LLM 输出解析使用
 from typing import List, Literal, Optional
 
