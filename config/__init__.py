@@ -1,4 +1,4 @@
-# config.py
+# Configuration module
 # 从环境变量读取大模型相关配置，所有变量均有合理默认值
 import os
 from dotenv import load_dotenv
