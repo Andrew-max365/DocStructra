@@ -133,6 +133,7 @@ curl -X POST "[http://127.0.0.1:8000/v1/agent/format/bundle](http://127.0.0.1:80
 ```text
 MyAgent/
 ├── agent/                    # Agent 核心逻辑、大模型调度与 ReAct 图
+│   └── cluster/              # Agent 集群（总控制 Agent + 功能 Agent）
 ├── api/                      # FastAPI REST API 服务端
 ├── core/                     # Word 文档底层读写、排版及规则引擎
 ├── ui/                       # 基于 Chainlit 的交互式 Web 界面
