@@ -24,6 +24,7 @@ except ImportError:
 CACHE_FILE_PATH = os.path.join(os.path.dirname(__file__), "search_cache.json")
 QUOTA_FILE_PATH = os.path.join(os.path.dirname(__file__), "search_quota.json")
 PREMIUM_DAILY_LIMIT = 30  # 每天允许使用优质搜索 API 的上限次数
+_FORMATTING_REQUEST_COORDINATOR = None
 
 
 def load_search_cache() -> Dict[str, str]:
@@ -396,25 +397,31 @@ async def parse_formatting_request(
     - 再结合模板中心路由进行稳健落地
     - 同时提取页眉/页脚/页码/目录/摘要操作（_hft 字段）
     """
-    from agent.cluster import (
-        HeaderFooterIntentFallbackAgent,
-        IntentUnderstandingAgent,
-        JsonGenerationAgent,
-        MasterControlAgent,
-        TemplateRoutingAgent,
-    )
-    from core.header_footer_toc import parse_header_footer_command as _local_hft_parse
-
-    coordinator = MasterControlAgent(
-        intent_agent=IntentUnderstandingAgent(parse_intent=parse_formatting_intent),
-        json_agent=JsonGenerationAgent(split_meta_fields=_split_meta_fields),
-        template_agent=TemplateRoutingAgent(resolve_template=resolve_template),
-        hft_fallback_agent=HeaderFooterIntentFallbackAgent(parse_hft_command=_local_hft_parse),
-    )
-    return await coordinator.parse_formatting_request(
+    return await _get_formatting_request_coordinator().parse_formatting_request(
         user_text,
         current_spec_path=current_spec_path,
     )
+
+
+def _get_formatting_request_coordinator():
+    global _FORMATTING_REQUEST_COORDINATOR
+    if _FORMATTING_REQUEST_COORDINATOR is None:
+        from agent.cluster import (
+            HeaderFooterIntentFallbackAgent,
+            IntentUnderstandingAgent,
+            JsonGenerationAgent,
+            MasterControlAgent,
+            TemplateRoutingAgent,
+        )
+        from core.header_footer_toc import parse_header_footer_command as _local_hft_parse
+
+        _FORMATTING_REQUEST_COORDINATOR = MasterControlAgent(
+            intent_agent=IntentUnderstandingAgent(parse_intent=parse_formatting_intent),
+            json_agent=JsonGenerationAgent(split_meta_fields=_split_meta_fields),
+            template_agent=TemplateRoutingAgent(resolve_template=resolve_template),
+            hft_fallback_agent=HeaderFooterIntentFallbackAgent(parse_hft_command=_local_hft_parse),
+        )
+    return _FORMATTING_REQUEST_COORDINATOR
 
 
 # ==========================================

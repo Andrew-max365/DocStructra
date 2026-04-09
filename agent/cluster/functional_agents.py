@@ -16,8 +16,8 @@ class IntentUnderstandingAgent:
 class JsonGenerationAgent:
     split_meta_fields: Callable[[dict], Tuple[dict, dict, dict]]
 
-    def run(self, payload: Optional[dict]) -> Tuple[dict, dict, dict]:
-        return self.split_meta_fields(payload or {})
+    def run(self, payload: dict) -> Tuple[dict, dict, dict]:
+        return self.split_meta_fields(payload)
 
 
 @dataclass

@@ -25,6 +25,7 @@ class MasterControlAgent:
         *,
         current_spec_path: str = "specs/default.yaml",
     ) -> dict:
+        """协调意图理解、JSON 拆分、模板路由与 HFT 兜底，返回统一排版请求协议。"""
         if self.intent_agent is None or self.json_agent is None or self.template_agent is None:
             raise RuntimeError("intent/json/template agents are required for parse_formatting_request")
 
@@ -58,11 +59,13 @@ class MasterControlAgent:
         }
 
     def execute_docx_file(self, **kwargs):
+        """协调格式执行 Agent 处理文件路径输入并返回原有 format_docx_file 结果。"""
         if self.formatting_agent is None:
             raise RuntimeError("formatting_agent is not configured")
         return self.formatting_agent.run_file(**kwargs)
 
     def execute_docx_bytes(self, **kwargs):
+        """协调格式执行 Agent 处理二进制输入并返回原有 format_docx_bytes 结果。"""
         if self.formatting_agent is None:
             raise RuntimeError("formatting_agent is not configured")
         return self.formatting_agent.run_bytes(**kwargs)
