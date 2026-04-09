@@ -30,7 +30,7 @@ except ImportError as e:
     raise ImportError("chainlit 未安装，请运行: pip install chainlit") from e
 
 from config import LLM_MODE, REACT_MAX_ITERS, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
-from service.format_service import format_docx_bytes
+from agent.subagents.orchestrator.format_service import format_docx_bytes
 from ui.diff_utils import (
     build_diff_items,
     parse_rejected_numbers,
@@ -60,7 +60,7 @@ _MAX_CHAT_HISTORY = 20
 
 def _deep_merge_dicts(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
     """深度合并两个配置字典，update 中的叶子值覆盖 base，不整层替换。委托给 core.spec._deep_merge。"""
-    from core.spec import _deep_merge
+    from agent.subagents.format_act.spec import _deep_merge
     return _deep_merge(base, update)
 
 
@@ -142,7 +142,7 @@ async def on_message(message: cl.Message):
                     await thinking_msg.send()
 
                     try:
-                        from agent.intent_parser import parse_formatting_request
+                        from agent.subagents.intent_route.intent_parser import parse_formatting_request
                         parsed = await parse_formatting_request(cmd_content, current_spec_path=spec_path)
                         formatting_intent = parsed.get("overrides", {})
                         hft_actions = parsed.get("hft_actions", {})
@@ -308,7 +308,7 @@ async def _run_react_with_steps(
             tmp_out = f.name
 
         # 🚀 引入我们刚刚写好的流式生成函数
-        from agent.graph.workflow import run_react_agent_stream
+        from agent.subagents.orchestrator.graph.workflow import run_react_agent_stream
 
         result_state = {}
 
@@ -360,7 +360,7 @@ async def _run_react_with_steps(
         ).send()
 
         # 原有的安全回退机制
-        from service.format_service import format_docx_bytes
+        from agent.subagents.orchestrator.format_service import format_docx_bytes
         out_bytes, report = await asyncio.to_thread(
             format_docx_bytes,
             input_bytes, filename_hint=filename, label_mode="hybrid",
@@ -470,7 +470,7 @@ async def _handle_chat(text: str) -> None:
         await thinking_msg.send()
 
         try:
-            from agent.intent_parser import parse_formatting_request
+            from agent.subagents.intent_route.intent_parser import parse_formatting_request
             current_spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
             parsed = await parse_formatting_request(cmd_content, current_spec_path=current_spec_path)
             formatting_intent = parsed.get("overrides", {})
@@ -612,7 +612,7 @@ _NON_HFT_FORMAT_KEYWORDS = [
 
 def _has_hft_intent(text: str) -> bool:
     """检查文本是否包含页眉/页脚/页码/目录相关关键词。"""
-    from agent.intent_classifier import _match_any, _HEADER_FOOTER_TOC_KEYWORDS
+    from agent.subagents.intent_route.intent_classifier import _match_any, _HEADER_FOOTER_TOC_KEYWORDS
     return _match_any(text, _HEADER_FOOTER_TOC_KEYWORDS)
 
 
@@ -631,8 +631,8 @@ async def _handle_audit(doc_bytes: bytes) -> None:
     """Feature 3：对上传的文档进行排版一致性审阅，返回问题列表。"""
     import io
     from docx import Document as _Document
-    from core.doc_audit import audit_document, format_audit_report
-    from core.parser import parse_docx_to_blocks
+    from agent.subagents.validate_review.doc_audit import audit_document, format_audit_report
+    from agent.subagents.ingest_parse.parser import parse_docx_to_blocks
 
     thinking_msg = cl.Message(content="🔍 正在分析文档排版一致性，请稍候...")
     await thinking_msg.send()
@@ -657,8 +657,8 @@ async def _run_review_proofread(doc_bytes: bytes, filename: str) -> bool:
     or False if no issues were found / LLM is unavailable.
     """
     import io
-    from core.parser import parse_docx_to_blocks
-    from agent.llm_client import LLMClient, LLMCallError
+    from agent.subagents.ingest_parse.parser import parse_docx_to_blocks
+    from agent.subagents.validate_review.llm_client import LLMClient, LLMCallError
 
     thinking_msg = cl.Message(content="🤖 正在进行 LLM 智能校对，检测错别字和标点问题...")
     await thinking_msg.send()
@@ -710,7 +710,7 @@ async def _apply_review_flow(base_bytes: bytes, review_content: str, filename: s
     """
     import io as _rev_io
     from docx import Document as _RevDocument
-    from core.partial_formatter import apply_partial_format as _apply_partial_format
+    from agent.subagents.format_act.partial_formatter import apply_partial_format as _apply_partial_format
 
     # 步骤 1：始终执行文档排版一致性审阅
     await _handle_audit(base_bytes)
@@ -720,7 +720,7 @@ async def _apply_review_flow(base_bytes: bytes, review_content: str, filename: s
     _changes_applied = False
     if review_content:
         try:
-            from agent.intent_parser import parse_formatting_request
+            from agent.subagents.intent_route.intent_parser import parse_formatting_request
             current_spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
             # 使用与 /f 相同的解析逻辑，获得完整的格式理解能力
             parsed = await parse_formatting_request(review_content, current_spec_path=current_spec_path)
@@ -829,7 +829,7 @@ async def _handle_header_footer_toc(
     """
     import io
     from docx import Document as _Document
-    from core.header_footer_toc import (
+    from agent.subagents.format_act.header_footer_toc import (
         set_header, set_footer, add_page_numbers, format_toc_content,
         parse_header_footer_command, remove_header_border,
     )
@@ -850,7 +850,7 @@ async def _handle_header_footer_toc(
             # 如果本地规则解析为空，尝试 LLM 解析
             if not parsed_cmd and LLM_API_KEY:
                 try:
-                    from agent.intent_parser import _extract_json
+                    from agent.subagents.intent_route.intent_parser import _extract_json
                     import openai as _openai
                     from config import LLM_BASE_URL, LLM_MODEL
                     client = _openai.AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=20.0)
@@ -885,7 +885,7 @@ async def _handle_header_footer_toc(
         # 当前字体配置
         current_spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
         try:
-            from core.spec import load_spec
+            from agent.subagents.format_act.spec import load_spec
             spec = load_spec(current_spec_path)
             zh_font = spec.raw.get("fonts", {}).get("zh", "宋体")
             en_font = spec.raw.get("fonts", {}).get("en", "Times New Roman")
@@ -980,8 +980,8 @@ async def _handle_partial_format(doc_bytes: bytes, user_text: str, filename: str
     """
     import io
     from docx import Document as _Document
-    from agent.intent_parser import parse_partial_format_request
-    from core.partial_formatter import apply_partial_format
+    from agent.subagents.intent_route.intent_parser import parse_partial_format_request
+    from agent.subagents.format_act.partial_formatter import apply_partial_format
 
     thinking_msg = cl.Message(content="⏳ 正在解析局部排版指令...")
     await thinking_msg.send()
@@ -1043,8 +1043,8 @@ async def _handle_locate_format(doc_bytes: bytes, user_text: str, filename: str)
     """Feature 4：定位文档中特定内容并重新排版，使其与周围格式一致。"""
     import io
     from docx import Document as _Document
-    from agent.intent_parser import parse_locate_format_request
-    from core.locate_formatter import locate_and_reformat
+    from agent.subagents.intent_route.intent_parser import parse_locate_format_request
+    from agent.subagents.format_act.locate_formatter import locate_and_reformat
 
     thinking_msg = cl.Message(content="🔍 正在定位文档中的目标段落...")
     await thinking_msg.send()
@@ -1151,7 +1151,7 @@ async def _handle_chat(text: str) -> None:
         await thinking_msg.send()
 
         try:
-            from agent.intent_parser import parse_formatting_request
+            from agent.subagents.intent_route.intent_parser import parse_formatting_request
             current_spec_path = cl.user_session.get(_KEY_SPEC_PATH, "specs/default.yaml")
             parsed = await parse_formatting_request(cmd_content, current_spec_path=current_spec_path)
             formatting_intent = parsed.get("overrides", {})
@@ -1319,7 +1319,7 @@ async def _handle_feedback(message: cl.Message) -> None:
     await thinking_msg.send()
 
     # 🚀 召唤大模型解析意图！
-    from agent.intent_parser import parse_feedback_intent
+    from agent.subagents.intent_route.intent_parser import parse_feedback_intent
     result = await parse_feedback_intent(text, total)
     await thinking_msg.remove()
 

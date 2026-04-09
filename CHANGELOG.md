@@ -4,7 +4,7 @@
 
 ### 问题描述
 
-执行 `python format_docx.py tests/samples/test_in.docx tests/samples/locx --label-mode llm`
+执行 `python -m cli.format_docx tests/samples/test_in.docx tests/samples/locx --label-mode llm`
 时，`service/format_service.py` 会在警告中输出：
 
 ```
@@ -21,7 +21,7 @@ LLM labeling failed, falling back to rule-based: LLM 审阅调用超时: Request
 
 ### 修改内容
 
-#### 1. `config.py` — 新增四个可配置环境变量
+#### 1. `config/__init__.py` — 新增四个可配置环境变量
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
