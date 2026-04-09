@@ -396,35 +396,25 @@ async def parse_formatting_request(
     - 再结合模板中心路由进行稳健落地
     - 同时提取页眉/页脚/页码/目录/摘要操作（_hft 字段）
     """
-    raw = await parse_formatting_intent(user_text)
-    overrides, llm_meta, hft_actions = _split_meta_fields(raw)
+    from agent.cluster import (
+        HeaderFooterIntentFallbackAgent,
+        IntentUnderstandingAgent,
+        JsonGenerationAgent,
+        MasterControlAgent,
+        TemplateRoutingAgent,
+    )
+    from core.header_footer_toc import parse_header_footer_command as _local_hft_parse
 
-    # 本地规则解析 HFT 操作作为兜底（能捕捉 LLM 可能遗漏的指令，如删除页眉横线）
-    try:
-        from core.header_footer_toc import parse_header_footer_command as _local_hft_parse
-        local_hft = _local_hft_parse(user_text)
-        for key, val in local_hft.items():
-            if key not in hft_actions:
-                hft_actions[key] = val
-    except Exception:
-        pass
-
-    decision = resolve_template(
+    coordinator = MasterControlAgent(
+        intent_agent=IntentUnderstandingAgent(parse_intent=parse_formatting_intent),
+        json_agent=JsonGenerationAgent(split_meta_fields=_split_meta_fields),
+        template_agent=TemplateRoutingAgent(resolve_template=resolve_template),
+        hft_fallback_agent=HeaderFooterIntentFallbackAgent(parse_hft_command=_local_hft_parse),
+    )
+    return await coordinator.parse_formatting_request(
         user_text,
         current_spec_path=current_spec_path,
-        llm_meta=llm_meta,
     )
-    return {
-        "overrides": overrides,
-        "hft_actions": hft_actions,
-        "spec_path": decision.spec_path,
-        "template": {
-            "domain": decision.domain,
-            "confidence": decision.confidence,
-            "source": decision.source,
-            "reason": decision.reason,
-        },
-    }
 
 
 # ==========================================

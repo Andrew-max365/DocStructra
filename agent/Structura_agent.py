@@ -22,6 +22,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
+from agent.cluster import FormattingExecutionAgent, MasterControlAgent
 from config import LLM_MODE
 from service.format_service import format_docx_file, format_docx_bytes
 
@@ -115,7 +116,13 @@ def run_doc_agent_file(
         "解释：生成可解释 report 并导出排版后的 DOCX",
     ]
 
-    res = format_docx_file(
+    coordinator = MasterControlAgent(
+        formatting_agent=FormattingExecutionAgent(
+            format_docx_file=format_docx_file,
+            format_docx_bytes=format_docx_bytes,
+        ),
+    )
+    res = coordinator.execute_docx_file(
         input_path=input_path,
         output_path=output_path,
         spec_path=spec_path,
@@ -160,7 +167,13 @@ def run_doc_agent_bytes(
         "解释：生成可解释 report 并返回排版后 DOCX（二进制）",
     ]
 
-    out_bytes, report = format_docx_bytes(
+    coordinator = MasterControlAgent(
+        formatting_agent=FormattingExecutionAgent(
+            format_docx_file=format_docx_file,
+            format_docx_bytes=format_docx_bytes,
+        ),
+    )
+    out_bytes, report = coordinator.execute_docx_bytes(
         input_bytes=input_bytes,
         spec_path=spec_path,
         filename_hint=filename_hint,
