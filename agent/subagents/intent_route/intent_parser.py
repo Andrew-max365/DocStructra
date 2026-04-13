@@ -413,7 +413,7 @@ def _get_formatting_request_coordinator():
             MasterControlAgent,
             TemplateRoutingAgent,
         )
-        from agent.subagents.format_act.header_footer_toc import parse_header_footer_command as _local_hft_parse
+        from agent.subagents.format_act.api import parse_header_footer_command as _local_hft_parse
 
         _FORMATTING_REQUEST_COORDINATOR = MasterControlAgent(
             intent_agent=IntentUnderstandingAgent(parse_intent=parse_formatting_intent),
@@ -706,7 +706,7 @@ async def parse_review_request(user_text: str) -> dict:
         if result and "has_requirements" in result:
             # 补充本地规则解析的 HFT 操作（捕捉 LLM 遗漏的，如删除页眉横线）
             try:
-                from agent.subagents.format_act.header_footer_toc import parse_header_footer_command as _local_hft_parse
+                from agent.subagents.format_act.api import parse_header_footer_command as _local_hft_parse
                 local_hft = _local_hft_parse(user_text)
                 hft_dict = result.setdefault("hft_actions", {})
                 for key, val in local_hft.items():
@@ -724,7 +724,7 @@ async def parse_review_request(user_text: str) -> dict:
     raw = await parse_formatting_intent(user_text)
     overrides, _, hft_actions = _split_meta_fields(raw)
     try:
-        from agent.subagents.format_act.header_footer_toc import parse_header_footer_command as _local_hft_parse
+        from agent.subagents.format_act.api import parse_header_footer_command as _local_hft_parse
         local_hft = _local_hft_parse(user_text)
         for key, val in local_hft.items():
             if key not in hft_actions:

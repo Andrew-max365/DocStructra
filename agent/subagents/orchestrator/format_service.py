@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from config import LLM_MODE, ENABLE_DOCLING
-from agent.subagents.format_act.spec import load_spec
-from agent.subagents.format_act.judge import rule_based_labels
-from agent.subagents.format_act.formatter import apply_formatting
-from agent.subagents.format_act.writer import save_docx
-from agent.subagents.ingest_parse.docling_adapter import parse_with_fallback
+from agent.subagents.format_act.api import load_spec
+from agent.subagents.format_act.api import rule_based_labels
+from agent.subagents.format_act.api import apply_formatting
+from agent.subagents.format_act.api import save_docx
+from agent.subagents.ingest_parse.api import parse_with_fallback
 
 
 VALID_LABEL_MODES = {"hybrid"}
@@ -49,7 +49,7 @@ def _resolve_labels(blocks, doc, label_mode: str) -> Dict[Any, str]:
     rule["_source"] = "rule_based"
 
     try:
-        from agent.subagents.validate_review.mode_router import ModeRouter
+        from agent.mode_router import ModeRouter
         router = ModeRouter(mode=mode)
         return router.route(doc, blocks, rule)
     except Exception as e:
@@ -157,7 +157,7 @@ def format_docx_file(
     # 针对非 React 模式，可以在最后追加一次 Visual Review （可选）
     if visual_review:
         try:
-            from agent.subagents.validate_review.visual_reviewer import visual_review as vr_run
+            from agent.subagents.validate_review.api import visual_review as vr_run
             vr_res = vr_run(output_path)
             report["visual_review"] = vr_res.model_dump()
         except Exception as e:

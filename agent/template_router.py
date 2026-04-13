@@ -1,2 +1,6 @@
 """Compatibility wrapper for migrated module."""
-from agent.subagents.intent_route.template_router import *  # noqa: F401,F403
+import sys
+import agent.subagents.intent_route.template_router as _impl
+
+globals().update(_impl.__dict__)
+sys.modules[__name__] = _impl

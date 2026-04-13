@@ -279,7 +279,7 @@ def classify_intent_with_llm(user_text: str, context: Optional[IntentContext] = 
     """
     使用 LLM 作为 fallback 分类意图（常用于复杂多轮长难句匹配）。
     """
-    from agent.subagents.validate_review.llm_client import LLMClient
+    from agent.subagents.validate_review.api import LLMClient
     
     system_prompt = (
         "你是一个意图分类助手。请根据用户的输入（以及可选的上下文）判断其真实的意图。\n"

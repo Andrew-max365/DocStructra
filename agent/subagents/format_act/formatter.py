@@ -12,9 +12,9 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 
-from agent.subagents.ingest_parse.parser import Block
+from agent.subagents.ingest_parse.api import Block
 from .spec import Spec
-from agent.subagents.ingest_parse.docx_utils import (
+from agent.subagents.ingest_parse.api import (
     copy_run_style,
     delete_paragraph,
     is_drawing_paragraph,
